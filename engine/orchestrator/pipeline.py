@@ -21,6 +21,11 @@
 
 Ошибка любого этапа логируется и не роняет конвейер: пропадает одна фраза,
 а не вся сессия.
+
+Inbound-конвейеру можно дать :class:`~engine.orchestrator.autoclone.AutoCloner`:
+он копит речь собеседника по таймкодам ``stt.final`` и, набрав достаточно,
+создаёт голосовой профиль в фоне. Как только профиль готов, следующие фразы
+озвучиваются уже им (до этого — встроенным голосом XTTS).
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from engine.contracts.events import (
     TranslationReady,
     validate_envelope,
 )
+from engine.orchestrator.autoclone import AutoCloner
 from engine.orchestrator.bus import EventBus
 from engine.orchestrator.db import Database
 from engine.stt.engine import SttEngine
@@ -139,11 +145,14 @@ class Pipeline:
         db: база; ``None`` — файловый режим без записи в SQLite.
         session_id: id сессии в БД; нужен вместе с ``db``.
         recorder: запись исходного аудио потока; ``None`` — не писать.
+        auto_cloner: автоклон голоса говорящего (обычно только для потока
+            ``in``); ``None`` — синтезировать голосом из ``voice_id``.
         emit_tts_chunks: публиковать ли служебные события ``tts.chunk``.
         drain_timeout_s: сколько ждать до-обработки очереди при остановке.
     """
 
     __slots__ = (
+        "_auto_cloner",
         "_bus",
         "_db",
         "_drain_timeout_s",
@@ -180,6 +189,7 @@ class Pipeline:
         db: Database | None = None,
         session_id: int | None = None,
         recorder: WavRecorder | None = None,
+        auto_cloner: AutoCloner | None = None,
         *,
         emit_tts_chunks: bool = False,
         drain_timeout_s: float = 10.0,
@@ -197,6 +207,7 @@ class Pipeline:
         self._db = db
         self._session_id = session_id
         self._recorder = recorder
+        self._auto_cloner = auto_cloner
         self._emit_tts_chunks = emit_tts_chunks
         self._drain_timeout_s = drain_timeout_s
         # В очередь кладём фразу вместе с замером STT: пока она ждёт обработки,
@@ -215,6 +226,22 @@ class Pipeline:
     def recorder(self) -> WavRecorder | None:
         """Рекордер исходного аудио, если запись включена."""
         return self._recorder
+
+    @property
+    def auto_cloner(self) -> AutoCloner | None:
+        """Автоклон голоса говорящего, если он подключён к конвейеру."""
+        return self._auto_cloner
+
+    @property
+    def voice_id(self) -> str | None:
+        """Каким голосом синтезируется перевод прямо сейчас.
+
+        Готовый автоклон имеет приоритет над ``voice_id`` из ``session.start``:
+        для потока ``in`` это и есть голос собеседника.
+        """
+        if self._auto_cloner is not None and self._auto_cloner.voice_id is not None:
+            return self._auto_cloner.voice_id
+        return self._voice_id
 
     # --- основной цикл -----------------------------------------------------
 
@@ -240,6 +267,8 @@ class Pipeline:
         finally:
             self._queue.put_nowait(None)
             await self._drain(worker)
+            if self._auto_cloner is not None:
+                await self._auto_cloner.wait()
             self._close_recorder()
             logger.info(
                 "конвейер %s остановлен: фраз %d, переводов %d, чанков TTS %d, ошибок %d",
@@ -272,6 +301,8 @@ class Pipeline:
         async for chunk in self._source:
             if self._recorder is not None:
                 self._recorder.write(chunk)
+            if self._auto_cloner is not None:
+                self._auto_cloner.feed(chunk)
             yield chunk
 
     # --- обработка фразы ---------------------------------------------------
@@ -295,6 +326,7 @@ class Pipeline:
         if not isinstance(payload, SttFinal):  # pragma: no cover — защита от чужого события
             return
 
+        self._note_auto_clone(payload)
         row_id = await self._insert_utterance(payload)
         ready = await self._translate(envelope, row_id)
         if ready is None:
@@ -306,6 +338,19 @@ class Pipeline:
         tts_ms, first_chunk_at = await self._speak(text)
 
         await self._publish_metrics(payload, stt_ms, mt_ms, tts_ms, first_chunk_at)
+
+    def _note_auto_clone(self, payload: SttFinal) -> None:
+        """Отдать автоклону речевой участок фразы и, если пора, запустить клон."""
+        cloner = self._auto_cloner
+        if cloner is None:
+            return
+        cloner.note_utterance(payload.t_start_ms, payload.t_end_ms)
+        if cloner.maybe_start():
+            logger.info(
+                "конвейер %s: собрано %.1f с речи, клонирую голос говорящего",
+                self._stream.value,
+                cloner.collected_seconds,
+            )
 
     async def _insert_utterance(self, payload: SttFinal) -> int | None:
         """Записать реплику в БД; вернуть её id (или ``None`` без БД/при ошибке)."""
@@ -361,7 +406,8 @@ class Pipeline:
         started = time.perf_counter()
         first_chunk_at: float | None = None
         try:
-            async for pcm in self._tts.synthesize(text, self._lang_dst, self._voice_id):
+            voice_id = self.voice_id
+            async for pcm in self._tts.synthesize(text, self._lang_dst, voice_id):
                 if first_chunk_at is None:
                     first_chunk_at = time.perf_counter()
                 await self._write_chunk(pcm)

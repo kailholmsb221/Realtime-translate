@@ -18,7 +18,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 import numpy as np
 
@@ -35,7 +35,7 @@ from engine.translate.base import TranslationProvider
 from engine.translate.service import TranslationService
 from engine.tts import create_tts
 from engine.tts.router import TtsRouter
-from engine.tts.voices import VoiceStore
+from engine.tts.voices import LatentsFn, VoiceStore
 
 __all__ = ["FAKE_TRANSCRIPT", "Runtime", "cuda_memory_mb"]
 
@@ -163,6 +163,26 @@ class Runtime:
             return FakeSink(fmt=self.config.audio.format, path=path)
         kind = "headphones" if stream is Stream.IN else "cable"
         return make_audio_sink(kind, self.config.audio)
+
+    def latents_fn(self) -> LatentsFn | None:
+        """Чем считать латенты XTTS при создании голосового профиля.
+
+        Берётся публичный ``compute_latents`` у провайдера ru/en — так же, как
+        это делает ``scripts/tts_smoke.py --create-voice``. В фейковом режиме и
+        у провайдеров без клонирования возвращается ``None``: тогда латенты
+        посчитает сам XTTS при первом синтезе этого голоса.
+        """
+        if self.config.is_fake:
+            return None
+        provider = self.tts.provider_for(Lang.RU)
+        compute = getattr(provider, "compute_latents", None)
+        if callable(compute):
+            return cast(LatentsFn, compute)
+        logger.warning(
+            "провайдер %s не умеет считать латенты — профиль создастся без latents.pt",
+            type(provider).__name__,
+        )
+        return None
 
     # --- прогрев -----------------------------------------------------------
 

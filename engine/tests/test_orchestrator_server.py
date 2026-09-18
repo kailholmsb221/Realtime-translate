@@ -28,6 +28,7 @@ from engine.contracts.events import (
     SessionStart,
     SessionState,
     SessionStop,
+    Stream,
     parse_event,
     to_json,
 )
@@ -257,3 +258,49 @@ async def test_rest_health(server: EngineServer) -> None:
         http.get(http_url(server, "/api/health")) as response,
     ):
         assert await response.json() == {"status": "ok", "backend": "fake"}
+
+
+async def test_auto_clone_attached_to_inbound_only(server: EngineServer) -> None:
+    """Голос из session.start уходит в outbound, а inbound клонирует собеседника."""
+    async with websockets.connect(ws_url(server)) as socket:
+        await recv_event(socket)  # idle
+        await socket.send(
+            to_json(
+                SessionStart(lang_in=Lang.EN, lang_out=Lang.RU, voice_id="v_user", record=False)
+            )
+        )
+        await recv_until(socket, EVENT_SESSION_STATE)
+
+        session = server.session
+        assert session is not None
+        inbound, outbound = session.pipelines
+        assert inbound.stream is Stream.IN
+        assert outbound.stream is Stream.OUT
+        # voice_id пользователя — только там, где звучит его речь.
+        assert outbound.voice_id == "v_user"
+        assert inbound.voice_id is None, "пока клон не готов — встроенный голос XTTS"
+        # Автоклон подключён к inbound и только к нему.
+        assert len(session.auto_cloners) == 1
+        assert inbound.auto_cloner is session.auto_cloners[0]
+        assert outbound.auto_cloner is None
+
+        await socket.send(to_json(SessionStop()))
+        await recv_until(socket, EVENT_SESSION_STATE)
+
+
+async def test_auto_clone_skipped_for_kazakh_session(server: EngineServer) -> None:
+    """Для kk автоклон не создаётся: клона у казахского TTS нет."""
+    async with websockets.connect(ws_url(server)) as socket:
+        await recv_event(socket)  # idle
+        await socket.send(
+            to_json(SessionStart(lang_in=Lang.KK, lang_out=Lang.RU, voice_id=None, record=False))
+        )
+        await recv_until(socket, EVENT_SESSION_STATE)
+
+        session = server.session
+        assert session is not None
+        assert session.auto_cloners == ()
+        assert all(pipeline.auto_cloner is None for pipeline in session.pipelines)
+
+        await socket.send(to_json(SessionStop()))
+        await recv_until(socket, EVENT_SESSION_STATE)

@@ -17,6 +17,11 @@ ARCHITECTURE.md 4.5: два конвейера на сессию и WebSocket-с
 ``out``      микрофон                   ``lang_out`` → ``lang_in``   VB-Cable (Zoom)
 ===========  =========================  ===========================  =================
 
+Голоса: ``voice_id`` из ``session.start`` — это голос **пользователя**, он идёт
+в outbound-конвейер. Голос собеседника движок клонирует сам в первые секунды
+разговора (:class:`~engine.orchestrator.autoclone.AutoCloner`), пока клон не
+готов — inbound звучит встроенным голосом XTTS.
+
 Команды принимаются только валидные (``parse_event``); всё остальное пишется
 в лог и игнорируется — кривое сообщение из UI не должно ронять движок.
 """
@@ -48,6 +53,7 @@ from engine.contracts.events import (
     parse_event,
     to_json,
 )
+from engine.orchestrator.autoclone import AutoCloner, supports_auto_clone
 from engine.orchestrator.bus import EventBus
 from engine.orchestrator.config import OrchestratorConfig
 from engine.orchestrator.db import Database
@@ -75,6 +81,7 @@ class Session:
     """
 
     __slots__ = (
+        "_auto_cloners",
         "_bus",
         "_command",
         "_config",
@@ -106,6 +113,7 @@ class Session:
         self._sources: list[AudioSource] = []
         self._sinks: list[AudioSink] = []
         self._recorders: list[WavRecorder] = []
+        self._auto_cloners: list[AutoCloner] = []
         self.session_id: int | None = None
 
     @property
@@ -164,6 +172,10 @@ class Session:
     def _build_pipeline(self, stream: Stream) -> Pipeline:
         lang_in, lang_out = self._command.lang_in, self._command.lang_out
         lang_src, lang_dst = (lang_in, lang_out) if stream is Stream.IN else (lang_out, lang_in)
+        # voice_id из session.start — голос пользователя: он нужен только там,
+        # где озвучивается его речь, то есть в outbound (решение владельца).
+        voice_id = self._command.voice_id if stream is Stream.OUT else None
+        auto_cloner = self._build_auto_cloner(stream, lang_src, lang_dst)
 
         source = self._runtime.create_source(stream)
         sink = self._runtime.create_sink(stream, self.session_id)
@@ -179,7 +191,7 @@ class Session:
             stream=stream,
             lang_src=lang_src,
             lang_dst=lang_dst,
-            voice_id=self._command.voice_id,
+            voice_id=voice_id,
             source=source,
             sink=sink,
             stt_engine=self._runtime.stt_engine(),
@@ -189,9 +201,41 @@ class Session:
             db=self._db,
             session_id=self.session_id,
             recorder=recorder,
+            auto_cloner=auto_cloner,
             emit_tts_chunks=self._config.emit_tts_chunks,
             drain_timeout_s=self._config.drain_timeout_s,
         )
+
+    def _build_auto_cloner(
+        self, stream: Stream, lang_src: Lang, lang_dst: Lang
+    ) -> AutoCloner | None:
+        """Автоклон голоса собеседника — только для потока ``in`` и только ru/en."""
+        config = self._config.auto_clone
+        if stream is not Stream.IN or not config.enabled:
+            return None
+        if not supports_auto_clone(lang_src, lang_dst):
+            logger.info(
+                "автоклон голоса пропущен: пара %s->%s вне ru/en (kk синтезируется без клона)",
+                lang_src.value,
+                lang_dst.value,
+            )
+            return None
+        cloner = AutoCloner(
+            config=config,
+            voices=self._runtime.voices,
+            lang=lang_src,
+            session_id=self.session_id,
+            db=self._db,
+            latents_fn=self._runtime.latents_fn(),
+            stream=stream.value,
+        )
+        self._auto_cloners.append(cloner)
+        return cloner
+
+    @property
+    def auto_cloners(self) -> tuple[AutoCloner, ...]:
+        """Автоклоны сессии (для тестов и отладки)."""
+        return tuple(self._auto_cloners)
 
     async def wait(self) -> None:
         """Дождаться, пока оба конвейера сами закончатся (файловые источники)."""
@@ -215,6 +259,9 @@ class Session:
                 await sink.close()
         for recorder in self._recorders:
             recorder.close()
+        for cloner in self._auto_cloners:
+            with contextlib.suppress(Exception):
+                await cloner.cleanup()
         self._sources.clear()
         self._sinks.clear()
 

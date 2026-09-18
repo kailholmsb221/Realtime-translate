@@ -12,10 +12,12 @@ FakeTts, FakeSource/FakeSink.
 from __future__ import annotations
 
 import asyncio
+import sys
 import wave
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from engine.audio_io import FakeSink, FakeSource
@@ -31,6 +33,12 @@ from engine.contracts.events import (
     TranslationReady,
     validate_envelope,
 )
+from engine.orchestrator.autoclone import (
+    AUTO_NAME_PREFIX,
+    AutoCloneConfig,
+    AutoCloner,
+    supports_auto_clone,
+)
 from engine.orchestrator.bus import EventBus
 from engine.orchestrator.db import Database
 from engine.orchestrator.pipeline import Pipeline, WavRecorder
@@ -40,13 +48,23 @@ from engine.stt.fake import EnergyVad, FakeTranscriber
 from engine.translate.base import TranslationResult
 from engine.translate.fake import FakeProvider
 from engine.translate.service import TranslationService
+from engine.tts.audio import Pcm16
 from engine.tts.base import Backend, TtsConfig
 from engine.tts.router import TtsRouter
+from engine.tts.voices import VoiceStore
 
 pytestmark = pytest.mark.asyncio
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 SPEECH_PATTERN = FIXTURES_DIR / "stt_speech_pattern.wav"
+if str(FIXTURES_DIR) not in sys.path:  # генератор фикстур лежит рядом с ними
+    sys.path.insert(0, str(FIXTURES_DIR))
+
+from stt_fixtures import silence, tone, write_wav  # noqa: E402 — после правки sys.path
+
+#: Тестовые пороги автоклона: VoiceStore принимает сэмпл не короче 5 секунд.
+AUTO_MIN_SECONDS = 6.0
+AUTO_MAX_SECONDS = 10.0
 
 
 def stt_config() -> SttConfig:
@@ -69,6 +87,67 @@ def make_engine(config: SttConfig | None = None, text: str = "тестовая �
 def make_router() -> TtsRouter:
     """Маршрутизатор TTS в фейковом режиме (тон вместо речи)."""
     return TtsRouter(TtsConfig(backend=Backend.FAKE, chunk_ms=20))
+
+
+def read_sample(path: Path) -> tuple[np.ndarray, int]:
+    """Прочитать WAV профиля голоса (VoiceStore пишет 24 kHz mono int16)."""
+    with wave.open(str(path), "rb") as handle:
+        rate = handle.getframerate()
+        frames = handle.readframes(handle.getnframes())
+    return np.frombuffer(frames, dtype="<i2"), rate
+
+
+def long_speech_wav(path: Path, phrases: int = 6, speech_ms: int = 2_000) -> Path:
+    """WAV «тон — тишина» ×N: набирается достаточно речи для автоклона."""
+    parts = []
+    for index in range(phrases):
+        parts.append(tone(speech_ms, freq_hz=440.0 + 40.0 * index))
+        parts.append(silence(1_000))
+    write_wav(path, np.concatenate(parts))
+    return path
+
+
+class _RecordingRouter(TtsRouter):
+    """Роутер TTS, запоминающий, каким голосом синтезировалась каждая фраза."""
+
+    def __init__(self) -> None:
+        super().__init__(TtsConfig(backend=Backend.FAKE, chunk_ms=20))
+        self.voice_ids: list[str | None] = []
+
+    async def synthesize(
+        self,
+        text: str,
+        lang: Lang,
+        voice_id: str | None = None,
+    ) -> AsyncIterator[Pcm16]:
+        self.voice_ids.append(voice_id)
+        async for chunk in super().synthesize(text, lang, voice_id):
+            yield chunk
+
+
+def make_cloner(
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    keep: bool = False,
+    lang: Lang = Lang.EN,
+    session_id: int | None = 1,
+    db: Database | None = None,
+) -> AutoCloner:
+    """Автоклон с тестовыми порогами и хранилищем голосов в каталоге теста."""
+    config = AutoCloneConfig(
+        enabled=enabled,
+        min_seconds=AUTO_MIN_SECONDS,
+        max_seconds=AUTO_MAX_SECONDS,
+        keep=keep,
+    )
+    return AutoCloner(
+        config=config,
+        voices=VoiceStore(tmp_path / "voices"),
+        lang=lang,
+        session_id=session_id,
+        db=db,
+    )
 
 
 class _BoomProvider:
@@ -121,27 +200,34 @@ async def run_pipeline(
     out_wav: Path | None = None,
     provider: object | None = None,
     stream: Stream = Stream.IN,
+    source_wav: Path | None = None,
+    auto_cloner: AutoCloner | None = None,
+    tts_router: TtsRouter | None = None,
+    lang_src: Lang = Lang.EN,
+    lang_dst: Lang = Lang.RU,
+    voice_id: str | None = None,
 ) -> tuple[Pipeline, list[Envelope], FakeSink]:
     """Прогнать фикстуру через конвейер и вернуть его, события и приёмник."""
     bus = EventBus()
     queue = bus.subscribe()
-    source = FakeSource.from_wav(SPEECH_PATTERN)
+    source = FakeSource.from_wav(source_wav if source_wav is not None else SPEECH_PATTERN)
     sink = FakeSink(path=out_wav)
     service = TranslationService(provider if provider is not None else FakeProvider())  # type: ignore[arg-type]
     pipeline = Pipeline(
         stream=stream,
-        lang_src=Lang.EN,
-        lang_dst=Lang.RU,
-        voice_id=None,
+        lang_src=lang_src,
+        lang_dst=lang_dst,
+        voice_id=voice_id,
         source=source,
         sink=sink,
         stt_engine=make_engine(),
         translation_service=service,
-        tts_router=make_router(),
+        tts_router=tts_router if tts_router is not None else make_router(),
         bus=bus,
         db=db,
         session_id=session_id,
         recorder=recorder,
+        auto_cloner=auto_cloner,
     )
     await pipeline.run()
     await sink.drain()
@@ -275,3 +361,146 @@ async def test_pipeline_without_db_keeps_ref_none(tmp_path: Path) -> None:
         assert payload.ref_utterance_id is None
         assert payload.src_lang is Lang.EN
         assert payload.dst_lang is Lang.RU
+
+
+# --- автоклон голоса собеседника ------------------------------------------
+
+
+async def test_auto_clone_creates_profile_once(db: Database, tmp_path: Path) -> None:
+    """Набрав нужные секунды речи, конвейер создаёт ровно один автопрофиль."""
+    session_id = await db.create_session(Lang.EN, Lang.RU)
+    cloner = make_cloner(tmp_path, db=db, session_id=session_id)
+
+    pipeline, events, _ = await run_pipeline(
+        db=db,
+        session_id=session_id,
+        out_wav=tmp_path / "out.wav",
+        source_wav=long_speech_wav(tmp_path / "speech.wav"),
+        auto_cloner=cloner,
+    )
+
+    assert len(of_type(events, EVENT_STT_FINAL)) >= 3
+    profile = cloner.profile
+    assert profile is not None
+    assert profile.id.startswith("v_")
+    assert profile.name == f"{AUTO_NAME_PREFIX}session{session_id}_in"
+    assert profile.lang is Lang.EN
+    assert profile.sample_path.is_file()
+
+    # Профиль ровно один — повторно клон не запускается.
+    assert len(cloner.voices.list()) == 1
+    assert pipeline.voice_id == profile.id
+
+    # И он же лежит в таблице voices как индекс для истории и UI.
+    rows = await db.list_voices()
+    assert [row["id"] for row in rows] == [profile.id]
+    assert rows[0]["name"].startswith(AUTO_NAME_PREFIX)
+
+
+async def test_auto_clone_switches_voice_for_next_phrases(tmp_path: Path) -> None:
+    """До клона синтез идёт голосом по умолчанию, после — автопрофилем."""
+    cloner = make_cloner(tmp_path)
+    router = _RecordingRouter()
+
+    await run_pipeline(
+        out_wav=tmp_path / "out.wav",
+        source_wav=long_speech_wav(tmp_path / "speech.wav"),
+        auto_cloner=cloner,
+        tts_router=router,
+    )
+
+    profile = cloner.profile
+    assert profile is not None
+    assert router.voice_ids[0] is None, "первая фраза — встроенный голос XTTS"
+    assert router.voice_ids[-1] == profile.id, "после клона звучит голос собеседника"
+    assert None in router.voice_ids and profile.id in router.voice_ids
+
+
+async def test_auto_clone_language_rules() -> None:
+    """Клон возможен только когда и сэмпл, и синтез — на ru/en (kk без клона)."""
+    assert supports_auto_clone(Lang.EN, Lang.RU)
+    assert supports_auto_clone(Lang.RU, Lang.EN)
+    assert not supports_auto_clone(Lang.KK, Lang.RU)  # сэмпл на kk — XTTS не умеет
+    assert not supports_auto_clone(Lang.RU, Lang.KK)  # синтез на kk — клон не нужен
+
+
+async def test_auto_clone_disabled_by_config(tmp_path: Path) -> None:
+    """``RT_AUTO_CLONE=0`` — речь не копится и профиль не создаётся."""
+    cloner = make_cloner(tmp_path, enabled=False)
+
+    pipeline, _, _ = await run_pipeline(
+        out_wav=tmp_path / "out.wav",
+        source_wav=long_speech_wav(tmp_path / "speech.wav"),
+        auto_cloner=cloner,
+    )
+
+    assert cloner.profile is None
+    assert cloner.collected_seconds == 0.0
+    assert not cloner.started
+    assert pipeline.voice_id is None
+    assert cloner.voices.list() == []
+
+
+async def test_auto_clone_cleanup_removes_profile(db: Database, tmp_path: Path) -> None:
+    """При остановке сессии автопрофиль удаляется (KEEP=0) — с диска и из БД."""
+    session_id = await db.create_session(Lang.EN, Lang.RU)
+    cloner = make_cloner(tmp_path, db=db, session_id=session_id)
+
+    await run_pipeline(
+        db=db,
+        session_id=session_id,
+        out_wav=tmp_path / "out.wav",
+        source_wav=long_speech_wav(tmp_path / "speech.wav"),
+        auto_cloner=cloner,
+    )
+    profile = cloner.profile
+    assert profile is not None
+    voice_dir = profile.dir
+
+    await cloner.cleanup()  # это делает Session.stop() по session.stop
+
+    assert cloner.profile is None
+    assert not voice_dir.exists()
+    assert await db.list_voices() == []
+
+
+async def test_auto_clone_cleanup_keeps_profile_when_asked(db: Database, tmp_path: Path) -> None:
+    """``RT_AUTO_CLONE_KEEP=1`` — профиль переживает сессию."""
+    session_id = await db.create_session(Lang.EN, Lang.RU)
+    cloner = make_cloner(tmp_path, db=db, session_id=session_id, keep=True)
+
+    await run_pipeline(
+        db=db,
+        session_id=session_id,
+        out_wav=tmp_path / "out.wav",
+        source_wav=long_speech_wav(tmp_path / "speech.wav"),
+        auto_cloner=cloner,
+    )
+    profile = cloner.profile
+    assert profile is not None
+
+    await cloner.cleanup()
+
+    assert cloner.profile is not None
+    assert profile.sample_path.is_file()
+    assert [row["id"] for row in await db.list_voices()] == [profile.id]
+
+
+async def test_auto_clone_uses_only_speech_segments(tmp_path: Path) -> None:
+    """В сэмпл попадает речь по таймкодам ``stt.final``, а не весь поток."""
+    cloner = make_cloner(tmp_path)
+    source = long_speech_wav(tmp_path / "speech.wav", phrases=4, speech_ms=2_000)
+
+    await run_pipeline(
+        out_wav=tmp_path / "out.wav",
+        source_wav=source,
+        auto_cloner=cloner,
+    )
+
+    profile = cloner.profile
+    assert profile is not None
+    sample, rate = read_sample(profile.sample_path)
+    duration = sample.size / rate
+    # Речи в источнике 8 с, тишины 4 с; в сэмпл ушла только речь.
+    assert AUTO_MIN_SECONDS <= duration <= AUTO_MAX_SECONDS
+    assert duration < 12.0

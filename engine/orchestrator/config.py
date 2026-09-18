@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from engine.audio_io.config import AudioConfig
+from engine.orchestrator.autoclone import AutoCloneConfig
 from engine.stt.base import SttConfig
 from engine.translate.base import TranslateConfig
 from engine.tts.base import Backend as TtsBackend
@@ -139,6 +140,7 @@ class OrchestratorConfig:
         drain_timeout_s: сколько ждать до-обработки очереди фраз при остановке.
         fake_in: WAV для фейкового источника потока ``in`` (live-режим на Linux).
         fake_out: WAV для фейкового источника потока ``out``.
+        auto_clone: автоклон голоса собеседника (``RT_AUTO_CLONE*``).
         audio: конфигурация :mod:`engine.audio_io`.
         stt: конфигурация :mod:`engine.stt`.
         translate: конфигурация :mod:`engine.translate`.
@@ -157,6 +159,7 @@ class OrchestratorConfig:
     drain_timeout_s: float = 10.0
     fake_in: Path | None = None
     fake_out: Path | None = None
+    auto_clone: AutoCloneConfig = field(default_factory=AutoCloneConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     translate: TranslateConfig = field(default_factory=TranslateConfig)
@@ -210,7 +213,7 @@ class OrchestratorConfig:
 
         Свои переменные: ``RT_WS_HOST``, ``RT_WS_PORT``, ``RT_HTTP_PORT``,
         ``RT_DB_PATH``, ``RT_RECORDINGS_DIR``, ``RT_BACKEND``,
-        ``RT_CORS_ORIGIN``, ``RT_WS_TTS_CHUNKS``. Остальное читают
+        ``RT_CORS_ORIGIN``, ``RT_WS_TTS_CHUNKS``, ``RT_AUTO_CLONE*``. Остальное читают
         ``AudioConfig.from_env`` / ``SttConfig.from_env`` /
         ``TranslateConfig.from_env`` / ``TtsConfig.from_env``.
 
@@ -232,6 +235,7 @@ class OrchestratorConfig:
             backend=_env_backend(source, ENV_BACKEND, "real"),
             cors_origin=_clean(source.get(ENV_CORS_ORIGIN)) or DEFAULT_CORS_ORIGIN,
             emit_tts_chunks=_env_bool(source, ENV_TTS_EVENTS, False),
+            auto_clone=AutoCloneConfig.from_env(source),
             audio=AudioConfig.from_env(source),
             stt=SttConfig.from_env(source),
             translate=TranslateConfig.from_env(),
