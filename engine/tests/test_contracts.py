@@ -312,4 +312,4 @@ def test_events_are_frozen() -> None:
     """Датаклассы событий иммутабельны (frozen=True)."""
     event = VALID_EVENTS[EVENT_STT_PARTIAL]
     with pytest.raises(AttributeError):
-        event.text = "changed"  # type: ignore[misc]
+        event.text = "changed"  # type: ignore[attr-defined]

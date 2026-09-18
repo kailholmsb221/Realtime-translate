@@ -1,3 +1,15 @@
 # Зона оркестратора (ARCHITECTURE.md 4.5, этап 2).
-websockets
-aiosqlite
+# Все пакеты лёгкие и ставятся на любой ОС: тяжёлые модели живут в
+# requirements-<модуль>.txt соседних зон.
+
+# WebSocket-сервер событий и команд (localhost:8765).
+websockets>=13
+
+# REST-сервер истории и голосов (localhost:8766) + multipart для POST /api/voices.
+aiohttp>=3.9
+
+# Асинхронный доступ к SQLite (db/schema.sql).
+aiosqlite>=0.19
+
+# Работа с PCM внутри конвейера (есть и в requirements-core.txt).
+numpy

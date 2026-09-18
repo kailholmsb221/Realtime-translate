@@ -58,13 +58,13 @@ def fixtures_dir() -> Path:
 @pytest.fixture(scope="session")
 def tone_wav(fixtures_dir: Path) -> Path:
     """WAV: синус 440 Гц, 1 с, 16 kHz mono int16."""
-    return fixtures_dir / TONE_FILENAME
+    return Path(fixtures_dir / TONE_FILENAME)
 
 
 @pytest.fixture(scope="session")
 def silence_wav(fixtures_dir: Path) -> Path:
     """WAV: тишина, 1 с, 16 kHz mono int16."""
-    return fixtures_dir / SILENCE_FILENAME
+    return Path(fixtures_dir / SILENCE_FILENAME)
 
 
 @pytest.fixture(scope="session")

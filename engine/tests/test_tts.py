@@ -589,7 +589,7 @@ async def test_xtts_early_break_does_not_hang(
     stream = provider.synthesize("привет", Lang.RU)
     first = await anext(stream)
     assert first.size == 480
-    await stream.aclose()
+    await stream.aclose()  # type: ignore[attr-defined]
 
 
 async def test_xtts_rejects_kk_and_empty_text(

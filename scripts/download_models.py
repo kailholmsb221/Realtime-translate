@@ -10,7 +10,8 @@
 ``nllb``      ``facebook/nllb-200-distilled-600M``        перевод, CPU
 ``vad``       pip-пакет ``silero-vad``                    нарезка потока на фразы
 ``xtts``      ``coqui/XTTS-v2``                           TTS ru/en с клоном голоса
-``kazakhtts`` ``issai/...`` (см. ``--kazakhtts-repo``)    TTS kk, без клона
+``kk_tts``    ``facebook/mms-tts-kaz``                    TTS kk (VITS, CPU, ~150 MB)
+``kazakhtts`` KazakhTTS2 (ISSAI)                          ручной шаг, см. ниже
 ============  ==========================================  ==========================
 
 Кэш — каталог ``./models`` рядом с репозиторием, переопределяется переменной
@@ -18,16 +19,20 @@
 
 Запуск::
 
-    python scripts/download_models.py                  # всё
+    python scripts/download_models.py                  # всё, что качается автоматически
     python scripts/download_models.py --only whisper nllb
+    python scripts/download_models.py --only kk_tts    # казахский TTS по умолчанию
     python scripts/download_models.py --list
-    python scripts/download_models.py --only kazakhtts --kazakhtts-repo issai/<точный-id>
+    python scripts/download_models.py --only kazakhtts --kazakhtts-repo <точный-id>
 
-Модель ``kazakhtts`` по умолчанию только **проверяется на доступность**
-(``--check-only`` включён для неё автоматически, см. ниже): точный id репозитория
-ISSAI KazakhTTS2 на Hugging Face не зафиксирован в ARCHITECTURE.md, поэтому он
-вынесен в параметр. Уточните его у владельца проекта и передайте
-``--kazakhtts-repo``, либо задайте ``RT_KAZAKHTTS_REPO``.
+Казахский TTS: по умолчанию проект берёт ``facebook/mms-tts-kaz`` (ключ
+``kk_tts``, ``RT_TTS_KK_BACKEND=mms``) — он качается как обычная модель.
+**KazakhTTS2 (ISSAI) — ручной шаг:** репозитория ``issai/KazakhTTS2`` на
+Hugging Face нет (проверено в сентябре 2026), чекпоинты выкладываются в
+https://github.com/IS2AI/Kazakh_TTS. Скрипт его не качает и только печатает
+инструкцию; если владелец зафиксирует точный id репозитория, передайте его
+``--kazakhtts-repo`` (или ``RT_KAZAKHTTS_REPO``) — тогда доступность будет
+проверена.
 """
 
 from __future__ import annotations
@@ -41,9 +46,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODELS_DIR = REPO_ROOT / "models"
 
-# Точный id KazakhTTS2 на Hugging Face не подтверждён владельцем — параметр.
-# TODO(владелец): зафиксировать репозиторий KazakhTTS2 (ISSAI) в ARCHITECTURE.md.
-DEFAULT_KAZAKHTTS_REPO = "issai/KazakhTTS2"
+# Репозитория issai/KazakhTTS2 на Hugging Face не существует (проверено в
+# сентябре 2026): у ISSAI опубликованы датасеты, `issai/KazGenericTTS` и
+# `issai/tilmash`, но не KazakhTTS2. Чекпоинты и рецепты — на GitHub
+# IS2AI/Kazakh_TTS, установка идёт вместе с ESPnet, то есть это ручной шаг.
+# TODO(владелец): если появится загружаемый чекпоинт — зафиксировать его id
+# в ARCHITECTURE.md 4.4 и передавать сюда через --kazakhtts-repo.
+DEFAULT_KAZAKHTTS_REPO = ""
+KAZAKHTTS_MANUAL_HINT = (
+    "KazakhTTS2 (ISSAI) не качается автоматически: готового репозитория на "
+    "Hugging Face нет. По умолчанию для kk используется facebook/mms-tts-kaz "
+    "(ключ kk_tts). Если нужен именно KazakhTTS2 — берите чекпоинты и рецепты "
+    "на https://github.com/IS2AI/Kazakh_TTS, ставьте ESPnet и включайте бэкенд "
+    "переменной RT_TTS_KK_BACKEND=kazakhtts2; точный id репозитория можно "
+    "передать флагом --kazakhtts-repo."
+)
 
 OK = "[ OK ]"
 WARN = "[WARN]"
@@ -61,7 +78,16 @@ class ModelSpec:
     allow_patterns: tuple[str, ...] | None = None
     #: только проверить доступность, не качать (id не подтверждён владельцем)
     check_only: bool = False
+    #: ставится руками: автоматической загрузки нет, печатается инструкция
+    manual: bool = False
     notes: str = ""
+    #: имя подкаталога в кэше; по умолчанию совпадает с ``key``
+    target: str | None = None
+
+    @property
+    def dirname(self) -> str:
+        """Каталог модели внутри кэша моделей."""
+        return self.target or self.key
 
 
 def model_specs(kazakhtts_repo: str) -> list[ModelSpec]:
@@ -83,11 +109,18 @@ def model_specs(kazakhtts_repo: str) -> list[ModelSpec]:
             role="TTS ru/en: XTTS-v2 с клонированием голоса (~2.5 GB VRAM)",
         ),
         ModelSpec(
+            key="kk_tts",
+            repo_id="facebook/mms-tts-kaz",
+            role="TTS kk: facebook/mms-tts-kaz (VITS, CPU, ~150 MB), без клонирования",
+            target="mms-tts-kaz",
+        ),
+        ModelSpec(
             key="kazakhtts",
             repo_id=kazakhtts_repo,
-            role="TTS kk: KazakhTTS2 (ISSAI), без клонирования голоса",
+            role="TTS kk (альтернатива): KazakhTTS2 (ISSAI) — ручная установка",
             check_only=True,
-            notes="id не зафиксирован в ARCHITECTURE.md — уточните --kazakhtts-repo",
+            manual=not kazakhtts_repo,
+            notes=KAZAKHTTS_MANUAL_HINT,
         ),
     ]
 
@@ -96,7 +129,7 @@ def model_specs(kazakhtts_repo: str) -> list[ModelSpec]:
 VAD_KEY = "vad"
 VAD_PIP_PACKAGE = "silero-vad"
 
-ALL_KEYS: tuple[str, ...] = ("whisper", "nllb", VAD_KEY, "xtts", "kazakhtts")
+ALL_KEYS: tuple[str, ...] = ("whisper", "nllb", VAD_KEY, "xtts", "kk_tts", "kazakhtts")
 
 
 @dataclass(slots=True)
@@ -132,6 +165,10 @@ def models_dir() -> Path:
 
 def download_hf(spec: ModelSpec, cache_dir: Path, report: Report) -> None:
     """Скачать (или проверить) репозиторий Hugging Face."""
+    if spec.manual:
+        report.add(spec.key, WARN, f"ручной шаг. {spec.notes}")
+        return
+
     try:
         from huggingface_hub import snapshot_download
         from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
@@ -139,7 +176,7 @@ def download_hf(spec: ModelSpec, cache_dir: Path, report: Report) -> None:
         report.add(spec.key, FAIL, "нет huggingface_hub — pip install huggingface_hub")
         return
 
-    target = cache_dir / spec.key
+    target = cache_dir / spec.dirname
 
     if spec.check_only:
         try:
@@ -213,7 +250,8 @@ def main() -> int:
     parser.add_argument(
         "--kazakhtts-repo",
         default=os.environ.get("RT_KAZAKHTTS_REPO", DEFAULT_KAZAKHTTS_REPO),
-        help=f"репозиторий KazakhTTS2 на Hugging Face (по умолчанию {DEFAULT_KAZAKHTTS_REPO})",
+        help="точный id репозитория KazakhTTS2 на Hugging Face, если он у вас есть "
+        "(по умолчанию пусто — ручная установка)",
     )
     parser.add_argument(
         "--models-dir",
@@ -229,8 +267,13 @@ def main() -> int:
     if args.list:
         print("Модели проекта (ARCHITECTURE.md разделы 4.2-4.4, 6):\n")
         for spec in specs:
-            flag = "  [только проверка]" if spec.check_only else ""
-            print(f"  {spec.key:<10} {spec.repo_id}{flag}\n             {spec.role}")
+            if spec.manual:
+                flag, repo = "  [ручной шаг]", spec.repo_id or "—"
+            elif spec.check_only:
+                flag, repo = "  [только проверка]", spec.repo_id
+            else:
+                flag, repo = "", spec.repo_id
+            print(f"  {spec.key:<10} {repo}{flag}\n             {spec.role}")
         print(f"  {VAD_KEY:<10} pip {VAD_PIP_PACKAGE}\n             VAD: нарезка потока на фразы")
         return 0
 

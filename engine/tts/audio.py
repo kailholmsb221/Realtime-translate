@@ -15,7 +15,7 @@ from __future__ import annotations
 import wave
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final, TypeAlias
+from typing import Final, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -61,10 +61,10 @@ def to_mono(samples: npt.ArrayLike, channels: int) -> Pcm16:
         raise ValueError(f"каналов должно быть >= 1, получено {channels}")
     array = np.asarray(samples).reshape(-1)
     if channels == 1:
-        return array.astype(np.int16)
+        return cast(Pcm16, array.astype(np.int16))
     usable = (array.size // channels) * channels
     frames = array[:usable].astype(np.float64).reshape(-1, channels)
-    return np.round(frames.mean(axis=1)).astype(np.int16)
+    return cast(Pcm16, np.round(frames.mean(axis=1)).astype(np.int16))
 
 
 def resample_linear(samples: npt.ArrayLike, src_rate: int, dst_rate: int) -> Pcm16:
@@ -80,7 +80,7 @@ def resample_linear(samples: npt.ArrayLike, src_rate: int, dst_rate: int) -> Pcm
         return np.zeros(0, dtype=np.int16)
     src_index = np.arange(n_dst, dtype=np.float64) * (src_rate / dst_rate)
     resampled = np.interp(src_index, np.arange(array.size, dtype=np.float64), array.astype(float))
-    return np.clip(np.round(resampled), -INT16_MAX - 1, INT16_MAX).astype(np.int16)
+    return cast(Pcm16, np.clip(np.round(resampled), -INT16_MAX - 1, INT16_MAX).astype(np.int16))
 
 
 def resample_pcm(samples: npt.ArrayLike, src_rate: int, dst_rate: int) -> Pcm16:
@@ -105,7 +105,7 @@ def resample_pcm(samples: npt.ArrayLike, src_rate: int, dst_rate: int) -> Pcm16:
         resampled = resampled[:expected]
     elif resampled.size < expected:
         resampled = np.pad(resampled, (0, expected - resampled.size))
-    return np.clip(np.round(resampled), -INT16_MAX - 1, INT16_MAX).astype(np.int16)
+    return cast(Pcm16, np.clip(np.round(resampled), -INT16_MAX - 1, INT16_MAX).astype(np.int16))
 
 
 def chunk_samples(sample_rate: int, chunk_ms: int) -> int:
