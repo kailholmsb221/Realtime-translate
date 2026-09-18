@@ -1,2 +1,23 @@
 # Зона агента B — stt (ARCHITECTURE.md 4.2).
-# Сюда: faster-whisper (модель small, int8_float16), silero-vad.
+# Модель whisper — только small, compute_type=int8_float16 (~1 GB VRAM):
+# CLAUDE.md закон 4 и бюджет VRAM из ARCHITECTURE.md раздел 6.
+
+# Распознавание: faster-whisper (CTranslate2), модель small int8_float16.
+faster-whisper>=1.0.3
+
+# VAD: официальный пакет Silero (load_silero_vad, VADIterator), окно 512 @ 16 kHz.
+silero-vad>=5.1
+
+# Аудио-буферы; продублировано из requirements-core.txt, чтобы модуль ставился отдельно.
+numpy>=1.26
+
+# torch нужен Silero VAD и определению доступности CUDA.
+# ВНИМАНИЕ: по умолчанию pip ставит CPU-сборку — она работает, но медленно.
+# Для RTX 4050 Laptop (6 GB) поставьте CUDA-сборку ДО установки этого файла:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r engine/stt/requirements-stt.txt
+#
+# faster-whisper на GPU дополнительно требует библиотек cuBLAS/cuDNN 9 —
+# см. engine/stt/README.md, раздел «Установка на Windows».
+torch>=2.2

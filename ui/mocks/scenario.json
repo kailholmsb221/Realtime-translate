@@ -1,0 +1,304 @@
+{
+  "_comment": "Сценарий mock-движка. Каждый шаг: пауза delay_ms, затем событие. Поле ts здесь всегда 0 — server.mjs подставляет реальное время при отправке. Все события валидны по engine/contracts/*.json (проверяется тестом tests/scenario.test.ts).",
+  "steps": [
+    {
+      "delay_ms": 600,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "in", "lang": "en", "text": "Hi, can you" }
+      }
+    },
+    {
+      "delay_ms": 500,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "in", "lang": "en", "text": "Hi, can you hear me" }
+      }
+    },
+    {
+      "delay_ms": 500,
+      "event": {
+        "type": "stt.final",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "lang": "en",
+          "text": "Hi, can you hear me well?",
+          "t_start_ms": 1200,
+          "t_end_ms": 4100
+        }
+      }
+    },
+    {
+      "delay_ms": 350,
+      "event": {
+        "type": "translation.ready",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "src_lang": "en",
+          "dst_lang": "ru",
+          "src_text": "Hi, can you hear me well?",
+          "text": "Привет, хорошо меня слышно?",
+          "ref_utterance_id": 101
+        }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "tts.chunk",
+        "ts": 0,
+        "payload": { "stream": "in", "seq": 0, "pcm_base64": "AAAAAAAAAAA=" }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "metrics.latency",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "stt_ms": 420,
+          "mt_ms": 310,
+          "tts_ms": 640,
+          "total_ms": 1370
+        }
+      }
+    },
+
+    {
+      "delay_ms": 900,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "out", "lang": "ru", "text": "Да" }
+      }
+    },
+    {
+      "delay_ms": 450,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "out", "lang": "ru", "text": "Да, слышно" }
+      }
+    },
+    {
+      "delay_ms": 450,
+      "event": {
+        "type": "stt.final",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "lang": "ru",
+          "text": "Да, слышно отлично.",
+          "t_start_ms": 5000,
+          "t_end_ms": 7400
+        }
+      }
+    },
+    {
+      "delay_ms": 400,
+      "event": {
+        "type": "translation.ready",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "src_lang": "ru",
+          "dst_lang": "en",
+          "src_text": "Да, слышно отлично.",
+          "text": "Yes, I hear you perfectly.",
+          "ref_utterance_id": 102
+        }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "metrics.latency",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "stt_ms": 380,
+          "mt_ms": 290,
+          "tts_ms": 700,
+          "total_ms": 1370
+        }
+      }
+    },
+
+    {
+      "delay_ms": 1200,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "in", "lang": "kk", "text": "Сәлеметсіз бе" }
+      }
+    },
+    {
+      "delay_ms": 500,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "in", "lang": "kk", "text": "Сәлеметсіз бе, кездесуді" }
+      }
+    },
+    {
+      "delay_ms": 550,
+      "event": {
+        "type": "stt.final",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "lang": "kk",
+          "text": "Сәлеметсіз бе, кездесуді бастайық.",
+          "t_start_ms": 9000,
+          "t_end_ms": 12600
+        }
+      }
+    },
+    {
+      "delay_ms": 500,
+      "event": {
+        "type": "translation.ready",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "src_lang": "kk",
+          "dst_lang": "ru",
+          "src_text": "Сәлеметсіз бе, кездесуді бастайық.",
+          "text": "Здравствуйте, давайте начнём встречу.",
+          "ref_utterance_id": 103
+        }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "metrics.latency",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "stt_ms": 910,
+          "mt_ms": 640,
+          "tts_ms": 1420,
+          "total_ms": 2970
+        }
+      }
+    },
+
+    {
+      "delay_ms": 900,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "out", "lang": "ru", "text": "Конечно" }
+      }
+    },
+    {
+      "delay_ms": 450,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "out", "lang": "ru", "text": "Конечно, я" }
+      }
+    },
+    {
+      "delay_ms": 450,
+      "event": {
+        "type": "stt.final",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "lang": "ru",
+          "text": "Конечно, я готов.",
+          "t_start_ms": 13500,
+          "t_end_ms": 15200
+        }
+      }
+    },
+    {
+      "delay_ms": 420,
+      "event": {
+        "type": "translation.ready",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "src_lang": "ru",
+          "dst_lang": "kk",
+          "src_text": "Конечно, я готов.",
+          "text": "Әрине, мен дайынмын.",
+          "ref_utterance_id": 104
+        }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "metrics.latency",
+        "ts": 0,
+        "payload": {
+          "stream": "out",
+          "stt_ms": 350,
+          "mt_ms": 420,
+          "tts_ms": 830,
+          "total_ms": 1600
+        }
+      }
+    },
+
+    {
+      "delay_ms": 1500,
+      "event": {
+        "type": "stt.partial",
+        "ts": 0,
+        "payload": { "stream": "in", "lang": "en", "text": "Great, let's" }
+      }
+    },
+    {
+      "delay_ms": 500,
+      "event": {
+        "type": "stt.final",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "lang": "en",
+          "text": "Great, let's go through the checklist.",
+          "t_start_ms": 17000,
+          "t_end_ms": 20100
+        }
+      }
+    },
+    {
+      "delay_ms": 380,
+      "event": {
+        "type": "translation.ready",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "src_lang": "en",
+          "dst_lang": "ru",
+          "src_text": "Great, let's go through the checklist.",
+          "text": "Отлично, давай пройдёмся по чек-листу.",
+          "ref_utterance_id": null
+        }
+      }
+    },
+    {
+      "delay_ms": 60,
+      "event": {
+        "type": "metrics.latency",
+        "ts": 0,
+        "payload": {
+          "stream": "in",
+          "stt_ms": 400,
+          "mt_ms": 260,
+          "tts_ms": 590,
+          "total_ms": 1250
+        }
+      }
+    }
+  ]
+}

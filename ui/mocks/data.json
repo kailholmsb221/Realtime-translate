@@ -1,0 +1,142 @@
+{
+  "_comment": "Фикстуры истории для заглушек src/app/api/**. Строки 1:1 с таблицами db/schema.sql (sessions, utterances, voices). Производные поля (utterance_count, duration_ms) считает route handler.",
+  "sessions": [
+    {
+      "id": 3,
+      "started_at": 1758240000000,
+      "ended_at": 1758240315000,
+      "lang_from": "en",
+      "lang_to": "ru",
+      "audio_path": "recordings/session-3.wav"
+    },
+    {
+      "id": 2,
+      "started_at": 1758153600000,
+      "ended_at": 1758153780000,
+      "lang_from": "kk",
+      "lang_to": "ru",
+      "audio_path": null
+    },
+    {
+      "id": 1,
+      "started_at": 1758067200000,
+      "ended_at": null,
+      "lang_from": "ru",
+      "lang_to": "en",
+      "audio_path": null
+    }
+  ],
+  "utterances": [
+    {
+      "id": 101,
+      "session_id": 3,
+      "t_start_ms": 1200,
+      "t_end_ms": 4100,
+      "speaker": "in",
+      "lang": "en",
+      "text": "Hi, can you hear me well?",
+      "translation": "Привет, хорошо меня слышно?",
+      "translation_lang": "ru"
+    },
+    {
+      "id": 102,
+      "session_id": 3,
+      "t_start_ms": 5000,
+      "t_end_ms": 7400,
+      "speaker": "out",
+      "lang": "ru",
+      "text": "Да, слышно отлично.",
+      "translation": "Yes, I hear you perfectly.",
+      "translation_lang": "en"
+    },
+    {
+      "id": 103,
+      "session_id": 3,
+      "t_start_ms": 9000,
+      "t_end_ms": 14800,
+      "speaker": "in",
+      "lang": "en",
+      "text": "Great. Let's go through the release checklist.",
+      "translation": "Отлично. Давай пройдёмся по чек-листу релиза.",
+      "translation_lang": "ru"
+    },
+    {
+      "id": 104,
+      "session_id": 3,
+      "t_start_ms": 16000,
+      "t_end_ms": 21200,
+      "speaker": "out",
+      "lang": "ru",
+      "text": "Первый пункт — задержка перевода не больше двух с половиной секунд.",
+      "translation": "The first item is translation latency under two and a half seconds.",
+      "translation_lang": "en"
+    },
+    {
+      "id": 105,
+      "session_id": 3,
+      "t_start_ms": 64000,
+      "t_end_ms": 67500,
+      "speaker": "in",
+      "lang": "en",
+      "text": "Sounds good, let's ship it.",
+      "translation": null,
+      "translation_lang": null
+    },
+    {
+      "id": 201,
+      "session_id": 2,
+      "t_start_ms": 800,
+      "t_end_ms": 3600,
+      "speaker": "in",
+      "lang": "kk",
+      "text": "Сәлеметсіз бе, кездесуді бастайық.",
+      "translation": "Здравствуйте, давайте начнём встречу.",
+      "translation_lang": "ru"
+    },
+    {
+      "id": 202,
+      "session_id": 2,
+      "t_start_ms": 4200,
+      "t_end_ms": 6900,
+      "speaker": "out",
+      "lang": "ru",
+      "text": "Конечно, я готов.",
+      "translation": "Әрине, мен дайынмын.",
+      "translation_lang": "kk"
+    },
+    {
+      "id": 301,
+      "session_id": 1,
+      "t_start_ms": 500,
+      "t_end_ms": 3300,
+      "speaker": "out",
+      "lang": "ru",
+      "text": "Проверка микрофона, раз, два, три.",
+      "translation": "Microphone check, one, two, three.",
+      "translation_lang": "en"
+    }
+  ],
+  "voices": [
+    {
+      "id": "v_ab12cd",
+      "name": "Мой голос (ru)",
+      "lang": "ru",
+      "sample_path": "voices/v_ab12cd.wav",
+      "created_at": 1757980800000
+    },
+    {
+      "id": "v_ef34gh",
+      "name": "My voice (en)",
+      "lang": "en",
+      "sample_path": "voices/v_ef34gh.wav",
+      "created_at": 1757984400000
+    },
+    {
+      "id": "v_kk_default",
+      "name": "KazakhTTS2 (kk, без клона)",
+      "lang": "kk",
+      "sample_path": "voices/v_kk_default.wav",
+      "created_at": 1757988000000
+    }
+  ]
+}

@@ -1,2 +1,27 @@
 # Зона агента A — audio_io (ARCHITECTURE.md 4.1).
-# Сюда: sounddevice / pyaudiowpatch (WASAPI loopback), soundfile и т.п.
+#
+# Живой звук нужен только на Windows: pyaudiowpatch даёт WASAPI loopback
+# (захват речи собеседника из Zoom), sounddevice — микрофон и воспроизведение
+# (наушники, вход VB-Audio Virtual Cable).
+#
+# VB-Audio Virtual Cable — системная программа, её пользователь ставит сам
+# (см. engine/audio_io/README.md); пакетом не устанавливается.
+#
+# Тесты и файловый режим работают вообще без аудио-библиотек: импорты
+# pyaudiowpatch/sounddevice ленивые, на Linux модуль даёт понятную ошибку.
+
+# WASAPI loopback — только Windows, на других ОС пакет не ставится.
+pyaudiowpatch ; sys_platform == "win32"
+
+# Микрофон и воспроизведение. На Linux требует системный PortAudio
+# (libportaudio2); без него audio_io просто сообщает, что бэкенд недоступен.
+sounddevice
+
+# Базовый формат PCM — numpy (дублирует requirements-core.txt намеренно:
+# модуль должен ставиться и отдельно).
+numpy
+
+# Опционально: с scipy ресемплинг идёт через scipy.signal.resample_poly
+# (polyphase — выше качество и скорость). Без scipy audio_io автоматически
+# переключается на линейную интерполяцию на numpy, тесты это покрывают.
+scipy

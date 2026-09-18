@@ -1,2 +1,32 @@
 # Зона агента D — tts (ARCHITECTURE.md 4.4).
-# Сюда: XTTS-v2 (coqui) для ru/en, KazakhTTS2 (ISSAI) для kk.
+# Только бесплатные open-source модели (CLAUDE.md, закон 3).
+#
+# torch ставится ОТДЕЛЬНО и под CUDA — иначе pip принесёт CPU-сборку и XTTS
+# будет синтезировать в разы медленнее реального времени.
+# Windows 11 + RTX 4050 (CUDA 12.1):
+#
+#     pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#     pip install -r engine/tts/requirements-tts.txt
+#
+# Проверка: python -c "import torch; print(torch.cuda.is_available())" -> True
+
+# XTTS-v2 для ru/en с клонированием голоса (~2.5 GB VRAM).
+# coqui-tts — поддерживаемый форк idiap архивного coqui-ai/TTS; импорт тот же: TTS.*
+# Лицензия весов XTTS-v2 — Coqui Public Model License (некоммерческое
+# использование), см. README модуля.
+coqui-tts>=0.25
+
+# Казахский TTS без клонирования: facebook/mms-tts-kaz (VITS, CPU, ~150 MB).
+transformers>=4.44
+
+# Инференс XTTS/VITS. Версии — из индекса CUDA (см. комментарий выше).
+torch>=2.1
+torchaudio>=2.1
+
+# Чтение/запись сэмплов голоса и ресемплинг.
+numpy
+# scipy опционален: с ним ресемплинг polyphase, без него — линейная интерполяция.
+scipy
+
+# Бэкенд kazakhtts2 (ISSAI, ESPnet) НЕ включён намеренно: он тянет весь ESPnet.
+# Инструкция по подключению — в engine/tts/kk_kazakhtts2.py.

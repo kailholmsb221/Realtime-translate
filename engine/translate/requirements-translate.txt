@@ -1,2 +1,14 @@
 # Зона агента C — translate (ARCHITECTURE.md 4.3).
-# Сюда: transformers / ctranslate2 для NLLB-200-distilled-600M (CPU).
+# NLLB-200-distilled-600M работает на CPU: GPU (6 GB) занята STT и TTS.
+transformers>=4.40
+# Токенизатор NLLB — SentencePiece.
+sentencepiece
+# CPU-сборки torch достаточно: перевод на GPU не поднимаем (ARCHITECTURE.md раздел 6).
+# Windows/Linux: pip install torch  — по умолчанию ставится сборка с CUDA;
+# чисто CPU-колесо экономит ~2 GB:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch
+# Опционально: нормализация/детокенизация для части языков в transformers.
+sacremoses
+# Веса тянутся через huggingface_hub (scripts/download_models.py --only nllb).
+huggingface_hub
