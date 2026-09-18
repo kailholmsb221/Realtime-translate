@@ -62,7 +62,7 @@ sqlite3 db/translator.db < db/schema.sql
 
 | поле | тип | описание |
 |---|---|---|
-| `id` | INTEGER PK | он же `voice_id` в `session.start` / `session.state` |
+| `id` | TEXT PK | = `voice_id` из контрактов (строка) |
 | `name` | TEXT NOT NULL UNIQUE | человекочитаемое имя профиля |
 | `lang` | TEXT NOT NULL | язык сэмпла |
 | `sample_path` | TEXT NOT NULL | WAV-сэмпл 15–30 сек для клонирования |
@@ -87,8 +87,6 @@ sqlite3 db/translator.db < db/schema.sql
 класть их сюда как `db/migrations/NNN_<описание>.sql` (по согласованию
 с владельцем).
 
-## Открытый вопрос к владельцу
+## Решение владельца
 
-`voice_id` в контрактах событий описан как `string | null`, а в таблице
-`voices` первичный ключ — `INTEGER`. Орхестратор должен приводить типы
-(`str(voices.id)`) либо владелец меняет одну из сторон — решение за владельцем.
+`voices.id` — TEXT и равен `voice_id` из контрактов (строка вида `v_<hex>`), приведения типов не требуется. `utterances.speaker` = `stream` (`'in'|'out'`), закреплено CHECK-ограничением.
