@@ -77,12 +77,18 @@ function trim(finals: Utterance[]): Utterance[] {
 /**
  * Куда прикрепить перевод.
  *
+ * Движок обрабатывает фразы одного потока строго по очереди (FIFO, один воркер
+ * на конвейер — engine/orchestrator/pipeline.py), поэтому очередной
+ * `translation.ready` относится к САМОЙ СТАРОЙ ещё не переведённой реплике.
+ * Искать с конца нельзя: перевод и синтез идут дольше распознавания, и к
+ * моменту `translation.ready` в ленте уже лежат более свежие `stt.final`.
+ *
  * Порядок поиска:
  *  1. реплика с уже известным `refUtteranceId === ref`;
- *  2. последняя реплика без перевода, чей текст совпал с `src_text`
- *     (единственный надёжный ключ: `stt.final` не несёт id реплики — см. README,
- *      вопрос к владельцу контрактов);
- *  3. последняя реплика без перевода;
+ *  2. самая старая реплика без перевода, чей текст совпал с `src_text`
+ *     (`stt.final` не несёт id реплики — см. README, вопрос к владельцу
+ *      контрактов);
+ *  3. самая старая реплика без перевода;
  *  4. последняя реплика ленты.
  */
 function findTarget(
@@ -94,12 +100,10 @@ function findTarget(
     const byId = finals.findIndex((u) => u.refUtteranceId === refUtteranceId);
     if (byId !== -1) return byId;
   }
-  for (let i = finals.length - 1; i >= 0; i -= 1) {
-    if (finals[i].translation === null && finals[i].text === srcText) return i;
-  }
-  for (let i = finals.length - 1; i >= 0; i -= 1) {
-    if (finals[i].translation === null) return i;
-  }
+  const byText = finals.findIndex((u) => u.translation === null && u.text === srcText);
+  if (byText !== -1) return byText;
+  const byOrder = finals.findIndex((u) => u.translation === null);
+  if (byOrder !== -1) return byOrder;
   return finals.length - 1;
 }
 
@@ -184,6 +188,18 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
           session,
           lanes: { in: emptyLane(), out: emptyLane() },
           metrics: { in: null, out: null },
+        };
+      }
+      if (session.status === "idle") {
+        // Сессия остановлена: незакрытая гипотеза stt.partial уже никогда не
+        // станет stt.final — гасим живые строки, чтобы они не висели в окне.
+        return {
+          ...next,
+          session,
+          lanes: {
+            in: { ...next.lanes.in, live: null },
+            out: { ...next.lanes.out, live: null },
+          },
         };
       }
       return { ...next, session };

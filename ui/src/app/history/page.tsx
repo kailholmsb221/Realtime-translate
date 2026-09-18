@@ -1,26 +1,20 @@
-"use client";
-
 import Link from "next/link";
-import { useEffect, useState } from "react";
 
 import type { SessionRow } from "@/lib/api";
-import { fetchSessions } from "@/lib/api";
 import { LANG_LABEL, formatDateTime, formatDuration, pluralUtterances } from "@/lib/format";
+import { getSessions } from "@/lib/server/history";
 
-export default function HistoryPage() {
-  const [sessions, setSessions] = useState<SessionRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+/** История живёт в БД движка — кэшировать её на сборке нечего. */
+export const dynamic = "force-dynamic";
 
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchSessions(controller.signal)
-      .then((data) => setSessions(data.sessions))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "не удалось загрузить историю");
-      });
-    return () => controller.abort();
-  }, []);
+export default async function HistoryPage() {
+  let sessions: SessionRow[] = [];
+  let error: string | null = null;
+  try {
+    sessions = await getSessions();
+  } catch (err: unknown) {
+    error = err instanceof Error ? err.message : "не удалось загрузить историю";
+  }
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-5">
@@ -37,16 +31,12 @@ export default function HistoryPage() {
         </p>
       ) : null}
 
-      {sessions === null && error === null ? (
-        <p className="text-sm text-slate-500">Загрузка…</p>
-      ) : null}
-
-      {sessions !== null && sessions.length === 0 ? (
+      {error === null && sessions.length === 0 ? (
         <p className="text-sm text-slate-500">Записанных сессий пока нет.</p>
       ) : null}
 
       <ul className="space-y-2">
-        {(sessions ?? []).map((session) => (
+        {sessions.map((session) => (
           <li key={session.id}>
             <Link
               href={`/history/${session.id}`}

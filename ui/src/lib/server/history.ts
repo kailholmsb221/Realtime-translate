@@ -9,7 +9,13 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { SessionRow, UtteranceRow, VoiceRow } from "@/lib/api";
+import type {
+  SessionDetailResponse,
+  SessionRow,
+  SessionsResponse,
+  UtteranceRow,
+  VoiceRow,
+} from "@/lib/api";
 
 /** Базовый URL REST-API движка (серверная переменная, не попадает в бандл клиента). */
 export const ENGINE_HTTP =
@@ -66,6 +72,51 @@ export async function tryEngine(pathname: string): Promise<Response | null> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Тот же поход в движок, но сразу разобранным JSON (`null` — движка нет). */
+async function engineJson<T>(pathname: string): Promise<T | null> {
+  const response = await tryEngine(pathname);
+  if (response === null) return null;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Список сессий для страницы истории: движок, иначе фикстуры.
+ *
+ * Страницы `/history` и `/history/[id]` рендерятся на сервере и зовут это
+ * напрямую — им не нужен лишний круг через собственные route handlers, а в
+ * HTML сразу приезжает транскрипт (а не «Загрузка…»).
+ */
+export async function getSessions(): Promise<SessionRow[]> {
+  const fromEngine = await engineJson<SessionsResponse>("/api/sessions");
+  if (fromEngine !== null) return fromEngine.sessions;
+
+  const data = await loadMockData();
+  return data.sessions
+    .map((session) => withDerived(session, data.utterances))
+    .sort((a, b) => b.started_at - a.started_at);
+}
+
+/** Сессия с транскриптом: движок, иначе фикстуры; `null` — такой сессии нет. */
+export async function getSessionDetail(id: string): Promise<SessionDetailResponse | null> {
+  const fromEngine = await engineJson<SessionDetailResponse>(
+    `/api/sessions/${encodeURIComponent(id)}`,
+  );
+  if (fromEngine !== null) return fromEngine;
+
+  const data = await loadMockData();
+  const session = data.sessions.find((s) => String(s.id) === id);
+  if (session === undefined) return null;
+
+  const utterances = data.utterances
+    .filter((u) => u.session_id === session.id)
+    .sort((a, b) => a.t_start_ms - b.t_start_ms);
+  return { session: withDerived(session, data.utterances), utterances };
 }
 
 /** Короткий WAV-тон вместо реальной записи — чтобы `<audio>` было что играть в мок-режиме. */

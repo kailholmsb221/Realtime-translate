@@ -167,6 +167,11 @@ async def _read_voice_form(request: web.Request, target_dir: Path) -> tuple[dict
     return fields, sample_path
 
 
+def _name_taken(store: VoiceStore, name: str) -> bool:
+    """Есть ли уже профиль с таким именем (``name UNIQUE`` в ``db/schema.sql``)."""
+    return any(profile.name == name for profile in store.list())
+
+
 async def _create_voice(request: web.Request) -> web.StreamResponse:
     """``POST /api/voices`` — создать профиль голоса и записать его в БД.
 
@@ -190,6 +195,11 @@ async def _create_voice(request: web.Request) -> web.StreamResponse:
             lang = Lang(lang_raw)
         except ValueError:
             return _error(400, f"поле 'lang' должно быть ru|en|kk, получено {lang_raw!r}")
+
+        # Занятое имя — это 409 (см. README модуля), а не 400: иначе
+        # VoiceStore отдал бы обычный VoiceError и клиент получил бы 400.
+        if await asyncio.to_thread(_name_taken, store, name):
+            return _error(409, f"имя голоса занято: {name!r} (name UNIQUE в db/schema.sql)")
 
         try:
             profile = await asyncio.to_thread(store.create_voice, sample_path, name, lang)

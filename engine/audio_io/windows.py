@@ -28,6 +28,7 @@ import collections
 import contextlib
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
@@ -83,6 +84,10 @@ log = logging.getLogger(__name__)
 DEFAULT_QUEUE_CHUNKS: Final[int] = 200
 #: Сколько миллисекунд аудио максимум копим в буфере воспроизведения.
 DEFAULT_SINK_BUFFER_MS: Final[int] = 4000
+#: Сколько ждать места в буфере воспроизведения, прежде чем отбросить чанк, с.
+DEFAULT_SINK_OVERFLOW_WAIT_S: Final[float] = 2.0
+#: Как часто проверять, освободилось ли место в буфере, с.
+SINK_ROOM_POLL_S: Final[float] = 0.005
 
 
 def _bytes_to_mono_int16(raw: bytes, channels: int, dtype: npt.DTypeLike) -> Int16Array:
@@ -388,7 +393,10 @@ class SoundDeviceSink(BaseAudioSink):
         device: устройство вывода.
         device_sample_rate: частота устройства (по умолчанию нативная).
         channels: число каналов (по умолчанию 2 или сколько поддерживает устройство).
-        buffer_ms: максимум аудио в буфере; лишнее отбрасывается с предупреждением.
+        buffer_ms: максимум аудио в буфере; при переполнении ``write`` ждёт,
+            пока драйвер вычерпает место (обратное давление).
+        overflow_wait_s: сколько ждать это место, прежде чем всё-таки отбросить
+            чанк (поток не играет — ждать бессмысленно).
     """
 
     def __init__(
@@ -400,6 +408,7 @@ class SoundDeviceSink(BaseAudioSink):
         buffer_ms: int = DEFAULT_SINK_BUFFER_MS,
         blocksize: int | None = None,
         resample_method: ResampleMethod = "auto",
+        overflow_wait_s: float = DEFAULT_SINK_OVERFLOW_WAIT_S,
     ) -> None:
         super().__init__()
         self.device = device
@@ -410,6 +419,7 @@ class SoundDeviceSink(BaseAudioSink):
         self._buffer_frames_max = int(self._rate * buffer_ms / 1000)
         self._blocksize = int(blocksize or max(int(self._rate * CHUNK_MS / 1000), 64))
         self._resample_method: ResampleMethod = resample_method
+        self._overflow_wait_s = max(0.0, overflow_wait_s)
         self._lock = threading.Lock()
         self._buffer: collections.deque[Float32Array] = collections.deque()
         self._buffered_frames = 0
@@ -490,10 +500,28 @@ class SoundDeviceSink(BaseAudioSink):
         block = np.repeat(mono.reshape(-1, 1), self._channels, axis=1)
         return np.ascontiguousarray(block, dtype=np.float32)
 
-    async def _write(self, chunk: AudioChunk) -> None:
-        block = self._prepare(chunk)
+    def _try_append(self, block: Float32Array) -> bool:
+        """Положить блок в буфер, если там есть место (потокобезопасно)."""
         with self._lock:
             if self._buffered_frames + block.shape[0] > self._buffer_frames_max:
+                return False
+            self._buffer.append(block)
+            self._buffered_frames += block.shape[0]
+            return True
+
+    async def _write(self, chunk: AudioChunk) -> None:
+        block = self._prepare(chunk)
+        deadline = time.monotonic() + self._overflow_wait_s
+        while not self._try_append(block):
+            # Буфер полон. Раньше чанк просто отбрасывался, и длинная фраза
+            # обрывалась на середине: TTS отдаёт до 15 с речи (max_utterance_ms)
+            # быстрее реального времени, а в буфере всего buffer_ms. Теперь
+            # ждём, пока драйвер вычерпает место, — фраза доигрывает целиком.
+            if (
+                self._stream is None
+                or block.shape[0] > self._buffer_frames_max
+                or time.monotonic() >= deadline
+            ):
                 self.stats.dropped_chunks += 1
                 log.warning(
                     "%s: буфер воспроизведения переполнен, чанк отброшен (всего %d)",
@@ -501,8 +529,7 @@ class SoundDeviceSink(BaseAudioSink):
                     self.stats.dropped_chunks,
                 )
                 return
-            self._buffer.append(block)
-            self._buffered_frames += block.shape[0]
+            await asyncio.sleep(SINK_ROOM_POLL_S)
         self.stats.note_chunk(chunk)
 
     async def drain(self) -> None:

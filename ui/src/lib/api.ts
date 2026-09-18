@@ -51,6 +51,27 @@ export interface VoiceRow {
   created_at: number;
 }
 
+/**
+ * Префикс имени автопрофиля голоса собеседника.
+ *
+ * Движок клонирует голос собеседника сам и заводит профиль с именем
+ * `auto_session<id>_<stream>` (engine/orchestrator/autoclone.py: схему БД
+ * менять нельзя, поэтому признак автопрофиля — префикс имени). Такой голос
+ * пользователю выбирать незачем: он озвучивает входящий поток и по умолчанию
+ * удаляется вместе с сессией.
+ */
+export const AUTO_VOICE_PREFIX = "auto_";
+
+/** Профиль создан движком автоматически (клон голоса собеседника). */
+export function isAutoVoice(voice: VoiceRow): boolean {
+  return voice.name.startsWith(AUTO_VOICE_PREFIX);
+}
+
+/** Профили, которые имеет смысл предлагать как «мой голос» (без автоклонов). */
+export function userVoices(voices: readonly VoiceRow[]): VoiceRow[] {
+  return voices.filter((voice) => !isAutoVoice(voice));
+}
+
 export interface SessionsResponse {
   sessions: SessionRow[];
 }

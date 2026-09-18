@@ -155,6 +155,41 @@ describe("translation.ready", () => {
     expect(state.lanes.in.finals.map((u) => u.refUtteranceId)).toEqual([11, 12]);
   });
 
+  it("при отставании перевода ложится на самую старую непереведённую реплику", () => {
+    // Регрессия: перевод и синтез идут дольше распознавания, поэтому к моменту
+    // translation.ready в ленте уже лежат более свежие stt.final. Движок
+    // публикует переводы строго по порядку фраз (FIFO, один воркер на поток),
+    // значит цель — самая старая реплика без перевода, а не самая свежая.
+    const state = reduceAll(initialState, [
+      final("in", "одна и та же фраза"),
+      final("in", "одна и та же фраза"),
+      final("in", "одна и та же фраза"),
+      ev("translation.ready", {
+        stream: "in",
+        src_lang: "en",
+        dst_lang: "ru",
+        src_text: "одна и та же фраза",
+        text: "перевод №1",
+        ref_utterance_id: 1,
+      }),
+      ev("translation.ready", {
+        stream: "in",
+        src_lang: "en",
+        dst_lang: "ru",
+        src_text: "одна и та же фраза",
+        text: "перевод №2",
+        ref_utterance_id: 2,
+      }),
+    ]);
+
+    expect(state.lanes.in.finals.map((u) => u.translation)).toEqual([
+      "перевод №1",
+      "перевод №2",
+      null,
+    ]);
+    expect(state.lanes.in.finals.map((u) => u.refUtteranceId)).toEqual([1, 2, null]);
+  });
+
   it("повторный перевод той же реплики находит её по ref_utterance_id", () => {
     const state = reduceAll(initialState, [
       final("in", "alpha"),
@@ -265,6 +300,35 @@ describe("session.state и метрики", () => {
 
     expect(stopped.session.status).toBe("idle");
     expect(countUtterances(stopped)).toBe(1);
+  });
+
+  it("stop гасит живые строки stt.partial", () => {
+    // Регрессия: последняя гипотеза распознавания уже не станет stt.final,
+    // но висела в окне до следующего запуска сессии.
+    const running = reduceAll(initialState, [
+      ev("session.state", {
+        status: "running",
+        session_id: 1,
+        langs: { in: "en", out: "ru" },
+        voice_id: null,
+      }),
+      ev("stt.partial", { stream: "in", lang: "en", text: "не досказал" }),
+      ev("stt.partial", { stream: "out", lang: "ru", text: "и я тоже" }),
+    ]);
+    expect(running.lanes.in.live).not.toBeNull();
+
+    const stopped = reduce(
+      running,
+      ev("session.state", {
+        status: "idle",
+        session_id: null,
+        langs: { in: "en", out: "ru" },
+        voice_id: null,
+      }),
+    );
+
+    expect(stopped.lanes.in.live).toBeNull();
+    expect(stopped.lanes.out.live).toBeNull();
   });
 
   it("метрики хранятся по потокам", () => {

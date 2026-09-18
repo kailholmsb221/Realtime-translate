@@ -10,6 +10,7 @@ Linux ровно то, что иначе проверяется только р�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 import types
@@ -347,17 +348,60 @@ async def test_sink_resamples_tts_chunk_and_feeds_driver(
 
 
 async def test_sink_drops_chunks_on_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Переполнение буфера воспроизведения не растит память, а считается."""
+    """Если драйвер не забирает звук, переполнение не растит память, а считается."""
     fake = fake_sounddevice_module([])
     monkeypatch.setattr("engine.audio_io.windows.import_sounddevice", lambda: fake)
 
-    sink = SoundDeviceSink(output_device(), buffer_ms=100)
+    # overflow_wait_s=0 — ждать место бессмысленно: никто не вычерпывает буфер.
+    sink = SoundDeviceSink(output_device(), buffer_ms=100, overflow_wait_s=0.0)
     chunk = AudioChunk.from_array(np.zeros(1600, dtype=np.int16))  # 100 мс на 16 kHz
     await sink.write(chunk)
     await sink.write(chunk)
 
     assert sink.stats.dropped_chunks == 1
     assert sink.buffered_frames == 4800
+    await sink.close()
+
+
+async def test_sink_waits_for_room_instead_of_cutting_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Регрессия: длинная фраза TTS не обрезается буфером воспроизведения.
+
+    TTS отдаёт фразу быстрее реального времени, а буфер приёмника ограничен
+    (``buffer_ms``). Раньше лишние чанки молча отбрасывались и перевод
+    обрывался на середине; теперь ``write`` ждёт, пока драйвер вычерпает место.
+    """
+    fake = fake_sounddevice_module([])
+    monkeypatch.setattr("engine.audio_io.windows.import_sounddevice", lambda: fake)
+
+    sink = SoundDeviceSink(output_device(), buffer_ms=100)
+    await sink.open()
+    stream = fake.OutputStream.instances[-1]
+
+    # 10 чанков по 100 мс (24 kHz TTS) в буфер на 100 мс: без обратного давления
+    # доехал бы только первый.
+    chunks = [
+        AudioChunk.from_array(np.full(2400, 1000 + index, dtype=np.int16), 0, TTS_FORMAT)
+        for index in range(10)
+    ]
+
+    async def consume() -> None:
+        """Драйвер, забирающий буфер как настоящий — по чуть-чуть."""
+        for _ in range(200):
+            stream.pull(2400)  # 50 мс на 48 kHz
+            await asyncio.sleep(0.001)
+
+    consumer = asyncio.create_task(consume())
+    for chunk in chunks:
+        await sink.write(chunk)
+    await sink.drain()
+    consumer.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await consumer
+
+    assert sink.stats.dropped_chunks == 0
+    assert sink.stats.chunks == len(chunks)
     await sink.close()
 
 

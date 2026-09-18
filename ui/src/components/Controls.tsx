@@ -4,10 +4,12 @@ import type { Lang, SessionStart } from "@/lib/contracts";
 import { LANGS } from "@/lib/contracts";
 import { LANG_LABEL } from "@/lib/format";
 import type { VoiceRow } from "@/lib/api";
+import { userVoices } from "@/lib/api";
 
 export interface ControlsProps {
   value: SessionStart;
   onChange: (value: SessionStart) => void;
+  /** Все профили из `/api/voices`; автоклоны собеседника отсюда не предлагаются. */
   voices: VoiceRow[];
   /** Сессия запущена движком. */
   running: boolean;
@@ -31,6 +33,9 @@ export function Controls({
   onStop,
 }: ControlsProps) {
   const locked = running;
+  // «Мой голос» — только профили пользователя: автоклон собеседника (auto_*)
+  // движок заводит и удаляет сам, выбирать его тут нечего.
+  const options = userVoices(voices);
 
   return (
     <section aria-label="Управление сессией" className="space-y-2 border-b border-slate-800 px-3 py-2">
@@ -80,7 +85,7 @@ export function Controls({
           aria-label="Голосовой профиль"
         >
           <option value="">Голос по умолчанию (без клона)</option>
-          {voices.map((voice) => (
+          {options.map((voice) => (
             <option key={voice.id} value={voice.id}>
               {voice.name} ({voice.lang})
             </option>

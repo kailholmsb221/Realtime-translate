@@ -264,6 +264,18 @@ class Pipeline:
                 if envelope.type == EVENT_STT_FINAL:
                     self.stats.finals += 1
                     self._queue.put_nowait((envelope, int(self._stt.last_latency_ms or 0)))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Источник (устройство пропало, таймаут WASAPI) или распознавание
+            # упали. Исключение не должно уходить в «никуда»: задача конвейера
+            # в live-режиме никем не ожидается до session.stop, и поток тихо
+            # умирал бы, а движок продолжал бы считать сессию живой.
+            self.stats.errors += 1
+            logger.exception(
+                "конвейер %s остановлен из-за ошибки источника или распознавания",
+                self._stream.value,
+            )
         finally:
             self._queue.put_nowait(None)
             await self._drain(worker)

@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from engine.audio_io import FakeSink, FakeSource
+from engine.audio_io.base import AudioChunk, AudioIOError, BaseAudioSource
 from engine.contracts.events import (
     EVENT_METRICS_LATENCY,
     EVENT_STT_FINAL,
@@ -148,6 +149,24 @@ def make_cloner(
         session_id=session_id,
         db=db,
     )
+
+
+class _BoomSource(BaseAudioSource):
+    """Источник, который обрывается ошибкой устройства посреди потока."""
+
+    async def _open(self) -> None:
+        return None
+
+    async def _close(self) -> None:
+        return None
+
+    def _iter_chunks(self) -> AsyncIterator[AudioChunk]:
+        async def gen() -> AsyncIterator[AudioChunk]:
+            for index in range(3):
+                yield AudioChunk.from_array(np.zeros(480, dtype=np.int16), index * 30)
+            raise AudioIOError("устройство пропало")
+
+        return gen()
 
 
 class _BoomProvider:
@@ -349,6 +368,39 @@ async def test_translation_failure_does_not_break_pipeline(db: Database, tmp_pat
     rows = await db.list_utterances(session_id)
     assert len(rows) == 2
     assert all(row["translation"] is None for row in rows)
+
+
+async def test_source_failure_does_not_leak_exception(tmp_path: Path) -> None:
+    """Регрессия: обрыв источника не роняет задачу конвейера с исключением.
+
+    В live-режиме задачу конвейера никто не ждёт до ``session.stop``, поэтому
+    исключение от устройства (``AudioIOError`` по таймауту WASAPI) уходило в
+    «никуда»: поток тихо умирал, движок продолжал считать сессию живой, а
+    ошибка всплывала лишь как «Task exception was never retrieved».
+    """
+    bus = EventBus()
+    queue = bus.subscribe()
+    sink = FakeSink(path=tmp_path / "out.wav")
+    pipeline = Pipeline(
+        stream=Stream.IN,
+        lang_src=Lang.EN,
+        lang_dst=Lang.RU,
+        voice_id=None,
+        source=_BoomSource(),
+        sink=sink,
+        stt_engine=make_engine(),
+        translation_service=TranslationService(FakeProvider()),
+        tts_router=make_router(),
+        bus=bus,
+    )
+
+    task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert task.exception() is None
+    assert pipeline.stats.errors == 1
+    bus.unsubscribe(queue)
+    await sink.close()
 
 
 async def test_pipeline_without_db_keeps_ref_none(tmp_path: Path) -> None:

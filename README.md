@@ -39,7 +39,9 @@
 loopback поймает собственный перевод). Подробности — в
 [engine/audio_io/README.md](engine/audio_io/README.md).
 
-**1. Окружение и зависимости.** PyTorch с CUDA ставится первым и отдельно:
+**1. Окружение и зависимости.** PyTorch с CUDA ставится **первым и отдельно**:
+с PyPI на Windows приезжает CPU-сборка, и тогда XTTS и whisper работают в разы
+медленнее реального времени.
 
 ```powershell
 git clone <repo> realtime-translator
@@ -47,10 +49,39 @@ cd realtime-translator
 
 python -m venv venv
 venv\Scripts\activate
+python -m pip install --upgrade pip
 
+# RTX 4050 Laptop (Ada, sm_89) — проверенная связка: torch 2.5.1 + CUDA 12.1
 pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
-python scripts\check_env.py          # Python, CUDA, VRAM, аудиоустройства, VB-Cable
+
+# проверка: должно напечатать True и имя видеокарты
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+pip install -r requirements.txt   # torch уже стоит — pip его не тронет
+python scripts\check_env.py       # Python, CUDA, VRAM, аудиоустройства, VB-Cable
+```
+
+Почему именно так:
+
+* **CUDA 12.x обязательна.** `faster-whisper` 1.2 тянет `ctranslate2 >= 4.0`,
+  а свежие `ctranslate2` собраны только под **CUDA 12 + cuDNN 9**. Индекс
+  `cu121` (или `cu124`) подходит, `cu118` — нет.
+* **cuBLAS и cuDNN 9** для `ctranslate2` приезжают вместе с CUDA-сборкой
+  torch. Если whisper падает с ошибкой про `cudnn64_9.dll`, доставьте их явно:
+  `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` (подробности — в
+  [engine/stt/README.md](engine/stt/README.md)).
+* **Драйвер NVIDIA** — из ветки с поддержкой CUDA 12 (Windows: 527.41 и
+  новее). Отдельно ставить CUDA Toolkit не нужно: всё необходимое лежит
+  внутри колёс torch.
+* **`coqui-tts` (XTTS-v2) тестируется с PyTorch 2.2+** и с версии 0.27.4 не
+  тянет torch за собой — поэтому torch и ставится руками. Если возьмёте torch
+  **2.6 и новее** (индексы `cu124` / `cu126`), обязательно возьмите и свежий
+  `coqui-tts` (>= 0.26): в torch 2.6 у `torch.load` по умолчанию включился
+  `weights_only=True`, и старые версии не открывают чекпойнт XTTS.
+
+```powershell
+# альтернатива посвежее (torch 2.6 + CUDA 12.4), тогда и coqui-tts >= 0.26
+pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 ```
 
 **2. Модели** (кэш — `./models`, переопределяется `RT_MODELS_DIR`):
@@ -64,10 +95,13 @@ python scripts\download_models.py --only whisper nllb xtts kk_tts
 KazakhTTS2 (ISSAI) — ручной шаг: загружаемого репозитория на Hugging Face нет,
 по умолчанию для kk используется `facebook/mms-tts-kaz` (ключ `kk_tts`).
 
-**3. База.** Движок применяет `db/schema.sql` сам при старте; вручную — так:
+**3. База.** Отдельный шаг не нужен: движок применяет `db/schema.sql` сам при
+старте (файл идемпотентный). Если хочется создать базу заранее, понадобится
+консольный `sqlite3` — в Windows он не входит в систему, скачайте
+*sqlite-tools* с <https://sqlite.org/download.html>:
 
 ```powershell
-sqlite3 db\translator.db < db\schema.sql
+sqlite3 db\translator.db ".read db/schema.sql"
 ```
 
 **4. Профиль своего голоса** (сэмпл 15–30 секунд своей речи, WAV):
@@ -98,16 +132,69 @@ python scripts\tts_smoke.py --create-voice sample.wav --name me --lang ru
 python scripts\e2e_smoke.py --real --file sample.wav --from ru --to en --realtime
 ```
 
-**6. Движок и UI** (два терминала):
+**6. Движок и UI** (два терминала).
+
+Терминал 1 — движок (не закрывайте, он держит модели в памяти):
 
 ```powershell
-python -m engine.orchestrator                 # WebSocket :8765, REST :8766
-cd ui && npm install && npm run dev           # http://localhost:3000
+venv\Scripts\activate
+python -m engine.orchestrator          # WebSocket :8765, REST :8766
 ```
 
-В окне UI выберите языки (`lang_in` — язык собеседника, `lang_out` — ваш),
-голосовой профиль, при необходимости включите запись и нажмите Start.
-История сессий — на `/history`.
+В логе должно появиться: прогрев `STT (faster-whisper small)` → `TTS (XTTS-v2)`
+→ `MT (NLLB-200, CPU)` с временем и занятой VRAM, затем строка
+`движок слушает: ws://127.0.0.1:8765, http://127.0.0.1:8766 (backend=real)`.
+
+Терминал 2 — UI:
+
+```powershell
+cd ui
+npm install
+npm run dev                            # http://localhost:3000
+```
+
+**Что видно в окне** (`http://localhost:3000`, маленькое окно на 480 px —
+держите его поверх Zoom):
+
+* верхняя строка — «движок на связи», «сессия идёт / не запущена», направление
+  языков, красная метка «● запись» и ссылка «История»;
+* полоса задержек: `stt / mt / tts / total` по каждому потоку; `total` больше
+  2500 мс подсвечивается — бюджет ARCHITECTURE.md раздела 2 превышен;
+* селекторы «Вход» (`lang_in` — язык собеседника) и «Выход» (`lang_out` — ваш
+  язык), список голосов (автоклоны `auto_*` в нём не показываются), галочка
+  записи и кнопки Start / Stop;
+* две ленты субтитров: **Собеседник** (перевод звучит в наушниках) и **Вы**
+  (перевод уходит в Zoom через CABLE Input). В каждой реплике сверху оригинал,
+  снизу перевод (пока его нет — курсивное «перевод…»); последняя строка курсивом
+  с мигающим курсором — ещё не законченная фраза (`stt.partial`);
+* внизу панель ассистента — транскрипт последних 5 минут (кнопка подсказок
+  пока заглушка).
+
+История сессий — на `http://localhost:3000/history`, транскрипт с
+таймкодами и проигрывателем записи — на `/history/<id>`.
+
+## Что проверить первым делом
+
+Если что-то не работает, идите по этому списку сверху вниз: каждый шаг
+проверяет ровно один слой и не требует предыдущего звонка в Zoom.
+
+| # | Команда | Что должно получиться |
+|---|---|---|
+| 1 | `python scripts\check_env.py` | `Python 3.11+ : да`, `CUDA : да`, `VB-Cable : да` |
+| 2 | `python scripts\download_models.py --list` | список моделей и отметки, что уже скачано |
+| 3 | `python scripts\audio_smoke.py --list` | в списке есть ваш микрофон, наушники, `CABLE Input`, loopback-устройство |
+| 4 | `python scripts\audio_smoke.py --tone "CABLE Input"` | Zoom (микрофон = CABLE Output) показывает уровень сигнала |
+| 5 | `python scripts\audio_smoke.py --record-loopback 5 check.wav` | в `check.wav` слышно то, что играло в наушниках |
+| 6 | `python scripts\translate_smoke.py --bench` | таблица шести направлений ru↔en↔kk с временем на CPU |
+| 7 | `python scripts\stt_smoke.py check.wav --lang ru` | события `stt.partial` / `stt.final` с распознанным текстом |
+| 8 | `python scripts\tts_smoke.py --say "проверка связи" --lang ru` | WAV в `out_tts\`, голос звучит внятно |
+| 9 | `python scripts\e2e_smoke.py --real --file sample.wav --from ru --to en --realtime` | события всей цепочки и `total_ms` в пределах 2500 мс |
+| 10 | `python -m engine.orchestrator` + `cd ui && npm run dev` | окно UI пишет «движок на связи», Start активен |
+
+Шаги 1–5 — железо и драйверы, 6–8 — модели по отдельности, 9 — вся цепочка,
+10 — сборка целиком. Без GPU те же скрипты гоняются на заглушках:
+`--fake` у `stt_smoke` / `tts_smoke` / `translate_smoke` и `e2e_smoke.py` без
+`--real`.
 
 ## Проверка без железа (Linux/CI, без моделей)
 
@@ -144,7 +231,8 @@ pytest engine/tests            # тесты движка (все на фейка
 ruff check engine scripts      # линт
 ruff format --check engine scripts
 mypy engine                    # типы
-cd ui && npm test              # тесты UI
+cd ui && npm test              # тесты UI (включая прогон записи событий движка)
+cd ui && npx tsc --noEmit && npm run lint && npm run build
 ```
 
 Тесты, поднимающие реальные модели, помечены `@pytest.mark.real_models` и по
@@ -199,6 +287,56 @@ scripts/              check_env.py, download_models.py, make_fixtures.py, e2e_sm
 
 Переменные конкретных модулей (`RT_AUDIO_*`, `RT_STT_*`, `RT_MT_*`, `RT_TTS_*`,
 `RT_VOICES_DIR`) описаны в README этих модулей.
+
+## Известные ограничения
+
+Про что стоит знать до первого звонка — это не баги, а сознательные рамки MVP.
+
+**Задержка.** Бюджет «конец фразы → озвучка перевода» — 2.5 с, и он считается
+**от конца фразы**: движок ждёт паузу (`min_silence_ms`, по умолчанию 500 мс),
+только потом распознаёт целиком. Разговор идёт «по рации»: вы слышите перевод
+реплики, когда собеседник её уже договорил. Длинная фраза закрывается
+принудительно через `RT_STT_MAX_UTTERANCE_MS` (15 с). Если `total_ms` в окне
+регулярно больше 2500 — см. таблицу troubleshooting в
+[engine/orchestrator/README.md](engine/orchestrator/README.md).
+
+**Казахский — без клона голоса.** XTTS-v2 клонирует только ru и en. Для kk
+берётся `facebook/mms-tts-kaz` (VITS, CPU): голос стандартный, `voice_id`
+игнорируется, автоклон собеседника не создаётся. KazakhTTS2 (ISSAI) можно
+подключить через `RT_TTS_KK_BACKEND=kazakhtts2` + `RT_KAZAKHTTS_REPO`, но
+готового загружаемого чекпойнта нет — это ручная установка.
+
+**Лицензии моделей — некоммерческое использование.** Веса XTTS-v2 идут под
+*Coqui Public Model License* (CPML): личное и исследовательское использование,
+коммерческое — нет. `facebook/mms-tts-kaz` — CC-BY-NC 4.0, тоже
+non-commercial. faster-whisper (MIT) и NLLB-200 (CC-BY-NC 4.0) — код
+свободный, веса NLLB тоже некоммерческие. Итог: **сборка годится для личных
+звонков и исследований, не для продукта**. Платных API в проекте нет и быть не
+должно (CLAUDE.md, закон 3).
+
+**Голос — биометрия.** Автоклон голоса собеседника допустим только с его
+согласия; по умолчанию профиль удаляется вместе с сессией
+(`RT_AUTO_CLONE_KEEP=0`), выключается целиком через `RT_AUTO_CLONE=0`.
+
+**Только Windows и только один звонок.** Живой звук — WASAPI loopback и
+VB-Cable, то есть Windows 10/11; на Linux/macOS работает лишь файловый и
+фейковый режимы. Один пользователь, одна сессия на процесс: новый
+`session.start` останавливает предыдущую сессию.
+
+**Нужны наушники.** Loopback снимает всё, что играет в устройстве вывода.
+Если перевод идёт в колонки, движок услышит сам себя и начнёт переводить
+собственную речь.
+
+**Качество.** whisper `small` — компромисс под 6 GB VRAM: имена, термины и
+акцент он путает. NLLB-200-distilled-600M переводит фразу без контекста
+диалога (окно контекста в коде есть, но NLLB его не использует). Первая фраза
+после старта звучит встроенным голосом XTTS — клон собеседника готов примерно
+через 12 секунд его речи.
+
+**Чего ещё нет.** LLM-подсказок ассистента (кнопка — заглушка), пагинации и
+поиска в истории, удаления голосов через REST, объединённой дорожки
+«собеседник + пользователь» в записи: `sessions.audio_path` указывает на WAV
+входящего потока, речь пользователя лежит рядом как `<id>_out.wav`.
 
 ## Контракты
 

@@ -148,6 +148,37 @@ describe("TranslatorWindow", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
+  it("в списке «мой голос» нет автоклонов собеседника (auto_*)", () => {
+    // Движок сам заводит профиль auto_session<id>_in для голоса собеседника
+    // (engine/orchestrator/autoclone.py) и по умолчанию удаляет его вместе с
+    // сессией: пользователю выбирать его как свой голос незачем.
+    const withAuto = [
+      ...voices,
+      {
+        id: "v_auto01",
+        name: "auto_session7_in",
+        lang: "en" as const,
+        sample_path: "voices/v_auto01/sample.wav",
+        created_at: 2,
+      },
+    ];
+
+    render(
+      <TranslatorWindow
+        status="open"
+        state={initialState}
+        voices={withAuto}
+        onStart={noop}
+        onStop={noop}
+      />,
+    );
+
+    const select = screen.getByLabelText("Голосовой профиль");
+    const options = within(select).getAllByRole("option").map((o) => o.textContent);
+    expect(options).toContain("Мой голос (ru) (ru)");
+    expect(options.some((label) => label?.includes("auto_"))).toBe(false);
+  });
+
   it("панель ассистента показывает транскрипт, кнопка подсказок — заглушка", () => {
     render(
       <TranslatorWindow

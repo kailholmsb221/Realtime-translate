@@ -1,0 +1,525 @@
+[
+  {
+    "type": "session.state",
+    "ts": 1789773900634,
+    "payload": {
+      "status": "idle",
+      "session_id": null,
+      "langs": {
+        "in": "en",
+        "out": "ru"
+      },
+      "voice_id": null
+    }
+  },
+  {
+    "type": "session.state",
+    "ts": 1789773900643,
+    "payload": {
+      "status": "running",
+      "session_id": 1,
+      "langs": {
+        "in": "en",
+        "out": "ru"
+      },
+      "voice_id": "v_2edca139"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773901664,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773902115,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773902685,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773902775,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза",
+      "t_start_ms": 0,
+      "t_end_ms": 1620
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773902777,
+    "payload": {
+      "stream": "in",
+      "src_lang": "en",
+      "dst_lang": "ru",
+      "src_text": "проверочная фраза",
+      "text": "[ru] проверочная фраза",
+      "ref_utterance_id": 1
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773902780,
+    "payload": {
+      "stream": "in",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 516
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773903106,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза",
+      "t_start_ms": 450,
+      "t_end_ms": 1950
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773903108,
+    "payload": {
+      "stream": "out",
+      "src_lang": "ru",
+      "dst_lang": "en",
+      "src_text": "проверочная фраза",
+      "text": "[en] проверочная фраза",
+      "ref_utterance_id": 2
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773903147,
+    "payload": {
+      "stream": "out",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 552
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773904154,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773904964,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773905174,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773905264,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза",
+      "t_start_ms": 2490,
+      "t_end_ms": 4110
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773905267,
+    "payload": {
+      "stream": "in",
+      "src_lang": "en",
+      "dst_lang": "ru",
+      "src_text": "проверочная фраза",
+      "text": "[ru] проверочная фраза",
+      "ref_utterance_id": 3
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773905270,
+    "payload": {
+      "stream": "in",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773905954,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза",
+      "t_start_ms": 3300,
+      "t_end_ms": 4800
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773905956,
+    "payload": {
+      "stream": "out",
+      "src_lang": "ru",
+      "dst_lang": "en",
+      "src_text": "проверочная фраза",
+      "text": "[en] проверочная фраза",
+      "ref_utterance_id": 4
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773905959,
+    "payload": {
+      "stream": "out",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773906644,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773907664,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773907755,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза",
+      "t_start_ms": 4980,
+      "t_end_ms": 6600
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773907757,
+    "payload": {
+      "stream": "in",
+      "src_lang": "en",
+      "dst_lang": "ru",
+      "src_text": "проверочная фраза",
+      "text": "[ru] проверочная фраза",
+      "ref_utterance_id": 5
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773907760,
+    "payload": {
+      "stream": "in",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773907815,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773908805,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза",
+      "t_start_ms": 6150,
+      "t_end_ms": 7650
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773908807,
+    "payload": {
+      "stream": "out",
+      "src_lang": "ru",
+      "dst_lang": "en",
+      "src_text": "проверочная фраза",
+      "text": "[en] проверочная фраза",
+      "ref_utterance_id": 6
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773908811,
+    "payload": {
+      "stream": "out",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 1,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773909164,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773910185,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773910274,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза",
+      "t_start_ms": 7500,
+      "t_end_ms": 9120
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773910277,
+    "payload": {
+      "stream": "in",
+      "src_lang": "en",
+      "dst_lang": "ru",
+      "src_text": "проверочная фраза",
+      "text": "[ru] проверочная фраза",
+      "ref_utterance_id": 7
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773910280,
+    "payload": {
+      "stream": "in",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 516
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773910664,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773911655,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза",
+      "t_start_ms": 9000,
+      "t_end_ms": 10500
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773911657,
+    "payload": {
+      "stream": "out",
+      "src_lang": "ru",
+      "dst_lang": "en",
+      "src_text": "проверочная фраза",
+      "text": "[en] проверочная фраза",
+      "ref_utterance_id": 8
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773911660,
+    "payload": {
+      "stream": "out",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773911655,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773912675,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773912764,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза",
+      "t_start_ms": 9990,
+      "t_end_ms": 11610
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773912766,
+    "payload": {
+      "stream": "in",
+      "src_lang": "en",
+      "dst_lang": "ru",
+      "src_text": "проверочная фраза",
+      "text": "[ru] проверочная фраза",
+      "ref_utterance_id": 9
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773912769,
+    "payload": {
+      "stream": "in",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 515
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773913514,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.partial",
+    "ts": 1789773914144,
+    "payload": {
+      "stream": "in",
+      "lang": "en",
+      "text": "проверочная фраза"
+    }
+  },
+  {
+    "type": "stt.final",
+    "ts": 1789773914504,
+    "payload": {
+      "stream": "out",
+      "lang": "ru",
+      "text": "проверочная фраза",
+      "t_start_ms": 11850,
+      "t_end_ms": 13350
+    }
+  },
+  {
+    "type": "translation.ready",
+    "ts": 1789773914506,
+    "payload": {
+      "stream": "out",
+      "src_lang": "ru",
+      "dst_lang": "en",
+      "src_text": "проверочная фраза",
+      "text": "[en] проверочная фраза",
+      "ref_utterance_id": 10
+    }
+  },
+  {
+    "type": "metrics.latency",
+    "ts": 1789773914509,
+    "payload": {
+      "stream": "out",
+      "stt_ms": 0,
+      "mt_ms": 0,
+      "tts_ms": 0,
+      "total_ms": 514
+    }
+  },
+  {
+    "type": "session.state",
+    "ts": 1789773914641,
+    "payload": {
+      "status": "idle",
+      "session_id": null,
+      "langs": {
+        "in": "en",
+        "out": "ru"
+      },
+      "voice_id": "v_2edca139"
+    }
+  }
+]

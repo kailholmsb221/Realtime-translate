@@ -456,7 +456,15 @@ class EngineServer:
         with self._bus.subscription() as queue:
             while True:
                 envelope = await queue.get()
-                await self._send_all(envelope)
+                try:
+                    await self._send_all(envelope)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Рассылка — единственный канал событий в UI: её падение
+                    # оставило бы окно навсегда без субтитров. Теряем одно
+                    # событие, но цикл продолжает работать.
+                    logger.exception("не удалось разослать событие %r", envelope.type)
 
     async def _send_all(self, envelope: Envelope) -> None:
         clients = list(self._clients)

@@ -245,6 +245,16 @@ async def test_rest_voices_create_and_list(server: EngineServer, tmp_path: Path)
         async with http.post(http_url(server, "/api/voices"), data=bad) as response:
             assert response.status == 400
 
+        # Регрессия: занятое имя — 409, как записано в README модуля
+        # (раньше VoiceStore отдавал обычный VoiceError и получался 400).
+        duplicate = aiohttp.FormData()
+        duplicate.add_field("name", "мой голос")
+        duplicate.add_field("lang", "ru")
+        duplicate.add_field("sample", sample.read_bytes(), filename="sample.wav")
+        async with http.post(http_url(server, "/api/voices"), data=duplicate) as response:
+            assert response.status == 409, await response.text()
+            assert "error" in await response.json()
+
     assert created["id"].startswith("v_")
     assert created["lang"] == "ru"
     assert voices == [created]
@@ -258,6 +268,36 @@ async def test_rest_health(server: EngineServer) -> None:
         http.get(http_url(server, "/api/health")) as response,
     ):
         assert await response.json() == {"status": "ok", "backend": "fake"}
+
+
+async def test_broadcast_survives_send_failure(server: EngineServer) -> None:
+    """Регрессия: сбой рассылки одного события не убивает канал событий в UI.
+
+    Раньше исключение из ``_send_all`` завершало фоновую задачу рассылки, и
+    окно навсегда переставало получать субтитры при живом WebSocket.
+    """
+    async with websockets.connect(ws_url(server)) as socket:
+        await recv_event(socket)  # idle
+
+        calls = {"n": 0}
+        original = EngineServer._send_all
+
+        async def flaky(self: EngineServer, envelope: Envelope) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("рассылка упала")
+            await original(self, envelope)
+
+        EngineServer._send_all = flaky  # type: ignore[method-assign]
+        try:
+            await server.bus.publish(Envelope.wrap(server.state()))  # это событие потеряется
+            await server.bus.publish(Envelope.wrap(server.state()))  # а это должно дойти
+            envelope = await recv_event(socket)
+        finally:
+            EngineServer._send_all = original  # type: ignore[method-assign]
+
+        assert envelope.type == EVENT_SESSION_STATE
+        assert calls["n"] == 2
 
 
 async def test_auto_clone_attached_to_inbound_only(server: EngineServer) -> None:
