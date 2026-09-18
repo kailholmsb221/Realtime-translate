@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/session.state.json",
+  "title": "Session state",
+  "description": "Текущее состояние сессии движка.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "session.state"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "running"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "langs": {
+          "type": "object",
+          "description": "Языки сессии по направлениям потоков.",
+          "properties": {
+            "in": {
+              "type": "string",
+              "enum": [
+                "ru",
+                "en",
+                "kk"
+              ]
+            },
+            "out": {
+              "type": "string",
+              "enum": [
+                "ru",
+                "en",
+                "kk"
+              ]
+            }
+          },
+          "required": [
+            "in",
+            "out"
+          ],
+          "additionalProperties": false
+        },
+        "voice_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "session_id",
+        "langs",
+        "voice_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}

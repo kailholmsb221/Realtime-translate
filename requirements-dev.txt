@@ -1,0 +1,7 @@
+# Инструменты разработки: тесты, линт, типизация.
+pytest
+pytest-asyncio
+ruff
+mypy
+jsonschema
+numpy

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/metrics.latency.json",
+  "title": "Latency metrics",
+  "description": "Замер задержки по стадиям пайплайна (мс). Бюджет total_ms <= 2500.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "metrics.latency"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "stream": {
+          "type": "string",
+          "enum": [
+            "in",
+            "out"
+          ]
+        },
+        "stt_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mt_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "stream",
+        "stt_ms",
+        "mt_ms",
+        "tts_ms",
+        "total_ms"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}

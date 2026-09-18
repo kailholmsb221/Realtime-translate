@@ -1,0 +1,3 @@
+# Зона оркестратора (ARCHITECTURE.md 4.5, этап 2).
+websockets
+aiosqlite

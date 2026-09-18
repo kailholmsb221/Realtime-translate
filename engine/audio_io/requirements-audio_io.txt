@@ -1,0 +1,2 @@
+# Зона агента A — audio_io (ARCHITECTURE.md 4.1).
+# Сюда: sounddevice / pyaudiowpatch (WASAPI loopback), soundfile и т.п.

@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- виртуальные окружения ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- модели (качаются scripts/download_models.py, RT_MODELS_DIR) ---
+models/
+
+# --- Node / Next.js (ui) ---
+node_modules/
+.next/
+out/
+ui/.env*.local
+
+# --- база данных и записи сессий ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+db/*.db
+recordings/
+voices/
+
+# --- аудио: сырые записи сессий не коммитим... ---
+*.wav
+# ...но тестовые фикстуры нужны в репозитории
+!engine/tests/fixtures/*.wav
+
+# --- прочее ---
+.env
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

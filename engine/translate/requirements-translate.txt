@@ -1,0 +1,2 @@
+# Зона агента C — translate (ARCHITECTURE.md 4.3).
+# Сюда: transformers / ctranslate2 для NLLB-200-distilled-600M (CPU).

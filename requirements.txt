@@ -1,0 +1,10 @@
+# Realtime Translator — общий список зависимостей.
+# Здесь только подключение модульных файлов: свои пакеты каждый агент
+# добавляет в requirements-<модуль>.txt своей зоны (CLAUDE.md, закон 1).
+-r requirements-core.txt
+-r engine/audio_io/requirements-audio_io.txt
+-r engine/stt/requirements-stt.txt
+-r engine/translate/requirements-translate.txt
+-r engine/tts/requirements-tts.txt
+-r engine/orchestrator/requirements-orchestrator.txt
+-r requirements-dev.txt

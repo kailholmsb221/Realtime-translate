@@ -1,0 +1,2 @@
+# Зона агента D — tts (ARCHITECTURE.md 4.4).
+# Сюда: XTTS-v2 (coqui) для ru/en, KazakhTTS2 (ISSAI) для kk.

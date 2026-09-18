@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/stt.final.json",
+  "title": "STT final",
+  "description": "Окончательный результат распознавания фразы с таймкодами.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "stt.final"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "stream": {
+          "type": "string",
+          "enum": [
+            "in",
+            "out"
+          ]
+        },
+        "lang": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "t_start_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "t_end_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "stream",
+        "lang",
+        "text",
+        "t_start_ms",
+        "t_end_ms"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}

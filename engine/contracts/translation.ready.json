@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/translation.ready.json",
+  "title": "Translation ready",
+  "description": "Готовый перевод одной фразы.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "translation.ready"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "stream": {
+          "type": "string",
+          "enum": [
+            "in",
+            "out"
+          ]
+        },
+        "src_lang": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "dst_lang": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "src_text": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "ref_utterance_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "stream",
+        "src_lang",
+        "dst_lang",
+        "src_text",
+        "text",
+        "ref_utterance_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}

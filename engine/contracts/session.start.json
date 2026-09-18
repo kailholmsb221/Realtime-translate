@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/session.start.json",
+  "title": "Session start command",
+  "description": "Команда UI -> движок: начать сессию.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "session.start"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "lang_in": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "lang_out": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "voice_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lang_in",
+        "lang_out",
+        "voice_id",
+        "record"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}

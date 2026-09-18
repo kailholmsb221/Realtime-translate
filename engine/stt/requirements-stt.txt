@@ -1,0 +1,2 @@
+# Зона агента B — stt (ARCHITECTURE.md 4.2).
+# Сюда: faster-whisper (модель small, int8_float16), silero-vad.

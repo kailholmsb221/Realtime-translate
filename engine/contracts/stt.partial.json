@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://realtime-translator.local/schemas/stt.partial.json",
+  "title": "STT partial",
+  "description": "Промежуточная (неокончательная) гипотеза распознавания речи.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "stt.partial"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "unix-время события в миллисекундах"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "stream": {
+          "type": "string",
+          "enum": [
+            "in",
+            "out"
+          ]
+        },
+        "lang": {
+          "type": "string",
+          "enum": [
+            "ru",
+            "en",
+            "kk"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stream",
+        "lang",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "ts",
+    "payload"
+  ],
+  "additionalProperties": false
+}
