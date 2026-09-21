@@ -46,3 +46,11 @@ Thumbs.db
 *.log
 .idea/
 .vscode/
+
+# --- личные прогоны тест-драйва (scripts/testdrive.py) ---
+# В voice_out/ лежат расшифровки реальных разговоров (transcript.txt),
+# в out_tts/ — озвучка смоук-тестов. Личные данные в репозиторий не кладём
+# (CLAUDE.md, закон 9).
+voice_out/
+out_tts/
+voice_sample.wav
