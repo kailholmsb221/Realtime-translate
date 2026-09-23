@@ -42,8 +42,10 @@ Int16Array = npt.NDArray[np.int16]
 #: Размер блока обработки, сэмплов при 16 кГц (15 мс — делитель чанка 30 мс).
 DEFAULT_BLOCK: Final[int] = 240
 
-#: Длина хвоста фильтра, мс: задержка вывода + отражения комнаты.
-DEFAULT_TAIL_MS: Final[int] = 300
+#: Длина хвоста фильтра, мс: задержка вывода + отражения комнаты. WASAPI в
+#: общем режиме плюс буфер приёмника дают до 300-400 мс, поэтому 300 мс не
+#: хватало — остаток озвучки доходил до whisper.
+DEFAULT_TAIL_MS: Final[int] = 600
 
 #: Насколько раньше расчётного момента может заиграть чанк, мс.
 #:
@@ -72,6 +74,27 @@ CONVERGED_ERLE_DB: Final[float] = 4.0
 #: речью человека поверх эха, а не плохо настроенным фильтром.
 DOUBLE_TALK_SHARE: Final[float] = 0.5
 
+#: Регуляризация NLMS: доля средней мощности опорного сигнала, добавляемая в
+#: знаменатель. Без неё в тихих бинах шаг взлетает до бесконечности, и фильтр
+#: расходится за несколько блоков — вместо эха он начинает добавлять шум.
+REGULARIZATION: Final[float] = 0.05
+
+#: Сглаживание оценки мощности по блокам (0 — только текущий блок).
+POWER_SMOOTHING: Final[float] = 0.7
+
+#: Если после вычитания стало громче во столько раз — фильтр ошибся. Его
+#: вывод не используем, а веса плавно забываем.
+DIVERGENCE_RATIO: Final[float] = 1.5
+
+#: Столько блоков подряд «громче входа» считаем устойчивым расхождением.
+DIVERGENCE_STREAK: Final[int] = 20
+
+#: Как быстро забываем веса при устойчивом расхождении (множитель на блок).
+LEAK: Final[float] = 0.7
+
+#: Пределы измеренной ERLE, дБ: один нелепый блок не должен утащить оценку.
+ERLE_CLIP_DB: Final[tuple[float, float]] = (-20.0, 60.0)
+
 
 def erle_db(echo: npt.NDArray[np.floating], residual: npt.NDArray[np.floating]) -> float:
     """Echo Return Loss Enhancement, дБ: насколько тише стало эхо.
@@ -96,6 +119,8 @@ class AecStats:
     adapted: int = 0
     #: Блоков, распознанных как двойной разговор (адаптация заморожена).
     double_talk: int = 0
+    #: Блоков, где фильтр сделал громче и его вывод отброшен.
+    rejected: int = 0
     #: Скользящая оценка подавления эха, дБ.
     erle_db: float = 0.0
 
@@ -116,10 +141,12 @@ class EchoCanceller:
     __slots__ = (
         "_block",
         "_freq_bins",
+        "_louder_streak",
         "_mu",
         "_partitions",
         "_pending",
         "_pending_pos",
+        "_power",
         "_pre_roll",
         "_ref",
         "_ref_end",
@@ -157,6 +184,10 @@ class EchoCanceller:
         self._spectra = np.zeros((self._partitions, self._freq_bins), dtype=np.complex128)
         #: Мощность каждого запомненного окна опорного сигнала (временная область).
         self._ref_powers = np.zeros(self._partitions, dtype=np.float64)
+        #: Сглаженная мощность опорного сигнала по бинам — знаменатель NLMS.
+        self._power = np.zeros(self._freq_bins, dtype=np.float64)
+        #: Сколько блоков подряд остаток был громче входа.
+        self._louder_streak = 0
 
         self._ref_len = max(int(sample_rate * ref_seconds), 4 * block)
         self._ref = np.zeros(self._ref_len, dtype=np.float32)
@@ -313,12 +344,28 @@ class EchoCanceller:
         residual_power = float(np.mean(np.square(residual, dtype=np.float64)))
         echo_power = float(np.mean(np.square(estimate, dtype=np.float64)))
 
-        if echo_power > 0.0:
-            measured = 10.0 * np.log10(max(near_power, 1e-20) / max(residual_power, 1e-20))
-            self.stats.erle_db = 0.9 * self.stats.erle_db + 0.1 * float(measured)
-
         if ref_power < REF_SILENCE_POWER:
             return residual
+
+        # Фильтр не имеет права делать сигнал громче: если остаток громче
+        # входа, в whisper уходит сырой микрофон, а не наша ошибка. Обучение
+        # при этом НЕ останавливается — на ранней сходимости такие блоки
+        # нормальны, и именно на них фильтр учится быстрее всего. Забываем веса
+        # только при устойчивом расхождении: много таких блоков подряд.
+        louder = near_power > 0.0 and residual_power > DIVERGENCE_RATIO * near_power
+        output = near if louder else residual
+        if louder:
+            self.stats.rejected += 1
+            self._louder_streak += 1
+            if self._louder_streak >= DIVERGENCE_STREAK:
+                self._weights *= LEAK
+                self.stats.erle_db = max(ERLE_CLIP_DB[0], self.stats.erle_db - 1.0)
+        else:
+            self._louder_streak = 0
+            if echo_power > 0.0:
+                measured = 10.0 * np.log10(max(near_power, 1e-20) / max(residual_power, 1e-20))
+                measured = float(np.clip(measured, *ERLE_CLIP_DB))
+                self.stats.erle_db = 0.9 * self.stats.erle_db + 0.1 * measured
 
         # Двойной разговор: человек заговорил поверх динамика. Подстраиваться
         # под его голос нельзя — фильтр разъедется и начнёт выгрызать живую
@@ -328,22 +375,31 @@ class EchoCanceller:
         converged = self.stats.erle_db > CONVERGED_ERLE_DB
         if converged and residual_power > DOUBLE_TALK_SHARE * near_power:
             self.stats.double_talk += 1
-            return residual
+            return output
 
         # Нормировка NLMS — по каждому частотному бину (сумма мощностей всех
         # партиций). Скалярная нормировка на всю энергию окна делает шаг на
         # три порядка меньше нужного, и фильтр не успевает сойтись за фразу.
-        power = np.sum(np.abs(self._spectra) ** 2, axis=0) + 1e-9
+        instant = np.sum(np.abs(self._spectra) ** 2, axis=0)
+        if not self._power.any():
+            self._power[:] = instant
+        self._power = POWER_SMOOTHING * self._power + (1.0 - POWER_SMOOTHING) * instant
+        # Регуляризация относительно средней мощности: тихий бин не получает
+        # гигантский шаг только потому, что в нём почти нет сигнала.
+        delta = REGULARIZATION * float(np.mean(self._power)) + 1e-12
         error_spectrum = np.fft.rfft(np.concatenate([np.zeros(self._block), residual]))
-        self._weights += (2.0 * self._mu) * np.conj(self._spectra) * error_spectrum / power
+        step = (2.0 * self._mu) * np.conj(self._spectra) * error_spectrum / (self._power + delta)
+        self._weights += step
         self.stats.adapted += 1
-        return residual
+        return output
 
     def reset(self) -> None:
         """Забыть накопленное (смена устройства, новая сессия)."""
         self._weights[:] = 0
         self._spectra[:] = 0
         self._ref_powers[:] = 0.0
+        self._power[:] = 0.0
+        self._louder_streak = 0
         self._ref[:] = 0.0
         self._ref_end = 0
         self._pending = np.zeros(0, dtype=np.float32)

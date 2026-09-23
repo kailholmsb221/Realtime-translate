@@ -111,6 +111,41 @@ def test_silent_speaker_passes_audio_through() -> None:
     assert canceller.stats.adapted == 0
 
 
+def test_filter_never_makes_input_louder() -> None:
+    """Расходящийся фильтр не подмешивает шум: вывод не громче входа.
+
+    Ровно так режим и «глючил со временем»: веса уползали, эхоподавитель
+    начинал добавлять в микрофон собственную оценку, whisper слышал шум и
+    выдумывал слова. Теперь блок, где стало громче, отбрасывается, а веса
+    забываются.
+    """
+    reference = speech_like(4.0, seed=11)
+    # Микрофон почти молчит: эха нет вовсе, только слабый шум.
+    mic = (np.random.default_rng(12).normal(0.0, 0.002, len(reference))).astype(np.float32)
+
+    canceller = EchoCanceller(RATE)
+    # Испортим веса, как если бы фильтр уже разошёлся.
+    canceller._weights[:] = 5.0
+    cleaned = run(canceller, reference, mic)
+
+    out_power = float(np.mean(np.square(cleaned, dtype=np.float64)))
+    in_power = float(np.mean(np.square(mic[: len(cleaned)], dtype=np.float64)))
+    assert out_power <= in_power * 1.6, "вывод громче входа — фильтр добавляет шум"
+    assert canceller.stats.rejected > 0, "расхождение должно быть замечено"
+
+
+def test_quiet_reference_does_not_blow_up_weights() -> None:
+    """Тихие бины опорного сигнала не раздувают шаг адаптации."""
+    reference = speech_like(5.0, seed=13) * 0.02  # очень тихая озвучка
+    echo = np.convolve(reference, room_impulse(), mode="full")[: len(reference)]
+    canceller = EchoCanceller(RATE)
+    cleaned = run(canceller, reference, echo)
+
+    assert np.isfinite(canceller._weights).all()
+    tail_from = int(RATE * 2.5)
+    assert erle_db(echo[tail_from : len(cleaned)], cleaned[tail_from:]) > 6.0
+
+
 def test_reset_forgets_everything() -> None:
     """После reset фильтр чист — например, сменили устройство вывода."""
     reference = speech_like(2.0, seed=5)

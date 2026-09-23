@@ -368,6 +368,42 @@ def test_sound_tags_are_hallucinations() -> None:
     assert not mic_subtitles.is_hallucination("мне нравится эта музыка, включи громче")
 
 
+def test_foreign_text_is_treated_as_echo() -> None:
+    """Латиница при языке ru — не речь пользователя, а остаток озвучки."""
+    assert mic_subtitles.looks_foreign("What's up?", Lang.RU)
+    assert mic_subtitles.looks_foreign("Hey, what is up", Lang.RU)
+    assert not mic_subtitles.looks_foreign("Привет, как дела", Lang.RU)
+    assert not mic_subtitles.looks_foreign("Окей, го", Lang.RU)
+    # И в обратную сторону: для английского источника кириллица — чужая.
+    assert mic_subtitles.looks_foreign("Привет", Lang.EN)
+    assert not mic_subtitles.looks_foreign("hello there", Lang.EN)
+    assert not mic_subtitles.looks_foreign("...", Lang.RU)
+
+
+async def test_echo_in_latin_never_reaches_panel() -> None:
+    """Whisper записал английское эхо при языке ru — фраза отбрасывается целиком."""
+    provider = FakeProvider()
+    app = build_app(text="What's up? What's up?", provider=provider)
+    async with ws_serve(app.handle_client, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as client:
+            await asyncio.wait_for(client.recv(), timeout=WS_TIMEOUT)
+            await app.start()
+            received: list[Envelope] = []
+            deadline = asyncio.get_running_loop().time() + 8.0
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(client.recv(), timeout=2.0)
+                except TimeoutError:
+                    break
+                received.append(parse_event(raw))
+            await app.stop()
+
+    assert all(e.type not in (EVENT_STT_FINAL, EVENT_TRANSLATION_READY) for e in received)
+    assert provider.calls == 0
+    assert app.echo_leaks > 0
+
+
 def test_repetition_spam_filter() -> None:
     """Залипание на одном слове отсекается, короткие повторы — нет."""
     assert mic_subtitles.is_repetition_spam("No, no, no, no, no, no, no, no")

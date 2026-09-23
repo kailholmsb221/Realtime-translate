@@ -130,17 +130,19 @@ DEFAULT_WS_PORT: Final[int] = 8765
 DEFAULT_WS_HOST: Final[str] = "127.0.0.1"
 
 #: Пауза, закрывающая фразу, мс. Короче штатных 500 мс: субтитрам важнее темп.
-DEFAULT_SILENCE_MS: Final[int] = 300
+DEFAULT_SILENCE_MS: Final[int] = 450
 
-#: Сколько аудио до срабатывания VAD прихватить в фразу, мс. На тихом входе
-#: детектор открывается с опозданием, и штатных 300 мс не хватает — первое
-#: слово фразы теряется.
-DEFAULT_PREROLL_MS: Final[int] = 600
+#: Сколько аудио до срабатывания VAD прихватить в фразу, мс. Спасает первое
+#: слово, но НЕ должно превышать паузу ``DEFAULT_SILENCE_MS``: движок берёт
+#: предзахват из общего хвоста аудио, и при большем значении в новую фразу
+#: попадает конец предыдущей — whisper повторяет уже сказанное.
+DEFAULT_PREROLL_MS: Final[int] = 250
 
 #: Предельная длина фразы, мс. Обычно фраза закрывается паузой (см.
 #: ``DEFAULT_SILENCE_MS``), а этот потолок нужен для непрерывной речи. Ставить
-#: его в 2 с нельзя: whisper получает обрывки и начинает выдумывать.
-DEFAULT_MAX_PHRASE_MS: Final[int] = 4_000
+#: его в 2-4 с нельзя: длинное предложение режется на обрывки посреди слова,
+#: whisper на обрывках выдумывает, а NLLB переводит куски без контекста.
+DEFAULT_MAX_PHRASE_MS: Final[int] = 7_000
 
 #: Сколько держать микрофон закрытым после конца озвучки, мс (эхо колонок).
 DEFAULT_TAIL_MS: Final[int] = 500
@@ -148,7 +150,7 @@ DEFAULT_TAIL_MS: Final[int] = 500
 #: Если фраза дождалась своей очереди позже этого, озвучивать её уже поздно:
 #: синтез идёт последовательно, и на непрерывной речи очередь копится, а звук
 #: отстаёт всё сильнее. Текст такой фразы в панель всё равно уходит.
-DEFAULT_STALE_MS: Final[int] = 3_000
+DEFAULT_STALE_MS: Final[int] = 4_000
 
 #: ``stream_chunk_size`` XTTS: чем меньше, тем раньше слышен первый звук.
 #: Штатные 20 дают ~1.9 с до первого чанка — для разговора это много.
@@ -262,6 +264,22 @@ def is_repetition_spam(text: str, *, min_words: int = 6, max_unique_share: float
     if len(words) < min_words:
         return False
     return len(set(words)) / len(words) <= max_unique_share
+
+
+def looks_foreign(text: str, src: Lang) -> bool:
+    """Не на том ли языке распознанное, на котором человек говорит.
+
+    Whisper работает с зафиксированным языком, но если микрофон поймал остаток
+    собственной английской озвучки, он честно запишет английские слова. Для
+    ``ru``/``kk`` латиница в распознанном — почти наверняка эхо, а не речь.
+    """
+    stripped = text.strip()
+    letters = [ch for ch in stripped if ch.isalpha()]
+    if not letters:
+        return False
+    cyrillic = sum(1 for ch in letters if "\u0400" <= ch <= "\u04ff")
+    share = cyrillic / len(letters)
+    return share < 0.5 if src in (Lang.RU, Lang.KK) else share > 0.5
 
 
 def looks_untranslated(text: str, dst: Lang) -> bool:
@@ -591,6 +609,8 @@ class MicSubtitles:
         self._t0: float | None = None
         #: Сколько фраз обработано с начала запуска.
         self.index = 0
+        #: Сколько раз whisper поймал остаток собственной озвучки.
+        self.echo_leaks = 0
 
     @property
     def speaking(self) -> bool:
@@ -727,6 +747,11 @@ class MicSubtitles:
             if envelope.type == EVENT_STT_FINAL:
                 logger.info("пропущен артефакт whisper: %r", text[:80])
             return True
+        if looks_foreign(text, self._lang_src):
+            if envelope.type == EVENT_STT_FINAL:
+                logger.info("похоже на эхо озвучки, пропущено: %r", text[:80])
+                self.echo_leaks += 1
+            return True
         return False
 
     def _timed(self, source: Any) -> AsyncIterator[AudioChunk]:
@@ -768,6 +793,10 @@ class MicSubtitles:
         payload = envelope.payload
         if not isinstance(payload, SttFinal):  # pragma: no cover — чужое событие
             return
+        # Сколько фраза простояла в очереди за предыдущими. Меряется до
+        # перевода: длинная фраза переводится дольше секунды, и если считать
+        # после, она сама себя признает протухшей.
+        waited_ms = round((time.perf_counter() - queued_at) * 1000)
 
         self.index += 1
         ready = await self._translation.handle(envelope, self._lang_dst)
@@ -784,17 +813,16 @@ class MicSubtitles:
         # Бюджет ARCHITECTURE.md раздела 2 — «конец фразы → озвучка», поэтому
         # засекаем момент ПЕРВОГО чанка синтеза, а не конца проигрывания: пока
         # перевод дочитывается, задержка уже не растёт (так же в pipeline.py).
-        waited_ms = round((time.perf_counter() - queued_at) * 1000)
-        backlog = self._queue.qsize() if self._queue is not None else 0
-        if waited_ms > self._stale_ms or backlog > 0:
-            # Отстаём: синтез идёт последовательно, и озвучка этой фразы легла
-            # бы поверх следующей. Голосом отдаём только ту фразу, что догнала
-            # реальное время; всё, что накопилось, уходит в панель текстом.
-            reason = f"ждала {waited_ms} мс" if backlog == 0 else f"в очереди ещё {backlog}"
-            logger.info("%s — не озвучиваю, только текст", reason)
+        if waited_ms > self._stale_ms:
+            # Отстаём: синтез идёт последовательно, и озвучка этой фразы
+            # прозвучала бы через несколько секунд после сказанного. Текст в
+            # панель уходит всё равно. Правило «в очереди есть ещё — молчать»
+            # тут не годится: пока длинная фраза переводится, следом почти
+            # всегда успевает прийти короткая, и длинная теряла голос.
+            logger.info("фраза ждала %d мс — не озвучиваю, только текст", waited_ms)
             tts_ms, spoken_s, first_at = 0, 0.0, None
         else:
-            tts_ms, spoken_s, first_at = await self._speak(text)
+            tts_ms, spoken_s, first_at = await self._speak(text, payload.text)
         ready_at = first_at if first_at is not None else time.perf_counter()
         elapsed_ms = round((ready_at - (self._t0 or ready_at)) * 1000)
         total_ms = max(0, elapsed_ms - payload.t_end_ms)
@@ -812,12 +840,17 @@ class MicSubtitles:
         )
 
         voiced = f", озвучено {spoken_s:.1f} с" if spoken_s > 0 else ""
+        if self._aec is not None and self._aec.stats.adapted > 0:
+            erle = self._aec.stats.erle_db
+            voiced += f", эхо {erle:+.0f} дБ" if erle < 3 else f", эхо подавлено на {erle:.0f} дБ"
+            if self._aec.stats.rejected:
+                voiced += f", фильтр сброшен ×{self._aec.stats.rejected}"
         self._print(
             f"              (stt {stt_ms} мс, mt {mt_ms} мс, tts {tts_ms} мс, "
             f"итого {total_ms} мс{voiced})"
         )
 
-    async def _speak(self, text: str) -> tuple[int, float, float | None]:
+    async def _speak(self, text: str, source: str = "") -> tuple[int, float, float | None]:
         """Озвучить перевод в приёмник.
 
         Микрофон на это время глушится полудуплексом, иначе whisper распознает
@@ -830,6 +863,9 @@ class MicSubtitles:
         """
         sink = self._sink
         if self._tts is None or sink is None or not text.strip():
+            return 0, 0.0, None
+        if source and text.strip().lower() == source.strip().lower():
+            logger.info("перевод совпал с исходником, не озвучиваю: %r", text)
             return 0, 0.0, None
         if looks_untranslated(text, self._lang_dst):
             # NLLB иногда возвращает исходную фразу как есть (обрывок, шум).
