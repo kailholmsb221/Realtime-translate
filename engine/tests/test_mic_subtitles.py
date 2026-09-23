@@ -423,7 +423,7 @@ def test_watchdog_flags_dead_microphone(monkeypatch: pytest.MonkeyPatch) -> None
         watchdog.note_input(0.0)  # цифровой ноль
     assert watchdog.input_dead
     watchdog._report()
-    assert any("ЦИФРОВОЙ НОЛЬ" in line for line in lines)
+    assert any("цифровой ноль" in line.lower() for line in lines)
 
     watchdog.note_input(0.03)
     assert not watchdog.input_dead
@@ -467,6 +467,38 @@ def test_speaker_echo_is_recognised_by_text() -> None:
     assert not app._is_noise(speech)
     assert mic_subtitles.similarity("Hey, what's up?", "hey what's up") > 0.8
     assert mic_subtitles.similarity("совсем другая фраза", "hello there") < 0.3
+
+
+def test_stale_audio_is_skipped_when_behind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Чанк, отставший от реального времени на секунды, пропускается.
+
+    Иначе при перегрузе распознавание получает речь, сказанную полминуты
+    назад, и перевод приходит безнадёжно поздно.
+    """
+    app = build_app()
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(mic_subtitles.time, "perf_counter", lambda: clock["now"])
+    app._t0 = 1000.0
+
+    clock["now"] = 1001.0  # прошла секунда реального времени
+    assert not app._behind(ts_ms=900)
+    clock["now"] = 1010.0
+    assert app._behind(ts_ms=900)
+    assert app.dropped_ms == 30
+    assert not app._behind(ts_ms=9_900)
+    assert not app._dropping
+
+
+def test_overlong_source_is_not_translated() -> None:
+    """Исходник длиннее живой фразы — мусор, NLLB на нём генерирует секунды."""
+    app = build_app()
+    long_text = "бұл жерде " * 60
+    envelope = mic_subtitles.Envelope.wrap(
+        mic_subtitles.SttFinal(
+            stream=Stream.OUT, lang=Lang.KK, text=long_text, t_start_ms=0, t_end_ms=7000
+        )
+    )
+    assert app._is_noise(envelope)
 
 
 def test_repetition_spam_filter() -> None:

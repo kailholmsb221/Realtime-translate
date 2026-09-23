@@ -252,6 +252,16 @@ RUN_OF_GROUP: Final[re.Pattern[str]] = re.compile(r"(\w{1,4}?)\1{3,}", re.UNICOD
 #: полминуты, а микрофон всё это время слушал бы динамик.
 MAX_SPOKEN_CHARS: Final[int] = 350
 
+#: Если аудио из микрофона отстало от реального времени больше этого, конвейер
+#: перегружен (whisper и NLLB на мусоре держат GIL секундами). Такие чанки
+#: пропускаем: секунда потерянной речи лучше, чем перевод через полминуты.
+MAX_AUDIO_LAG_MS: Final[int] = 2_500
+
+#: Длиннее этого распознанное в перевод не отдаём: живая фраза в 7 с — это
+#: 150-200 знаков, всё заметно длиннее — размноженный повторами мусор, на
+#: котором NLLB генерирует секунды.
+MAX_SOURCE_CHARS: Final[int] = 300
+
 #: Сколько последних озвученных переводов помним для защиты от эха по тексту.
 SPOKEN_MEMORY: Final[int] = 6
 
@@ -563,9 +573,10 @@ class LoopWatchdog:
         if self.input_dead and not self._dead_reported:
             self._dead_reported = True
             self.printer(
-                "[сторож] МИКРОФОН ОТДАЁТ ЦИФРОВОЙ НОЛЬ уже "
-                f"{DEAD_INPUT_S:.0f}+ с: проверьте клавишу выключения микрофона "
-                "(Fn + перечёркнутый микрофон) и ползунок «Ввод» в настройках звука"
+                "[сторож] микрофон отдаёт цифровой ноль уже "
+                f"{DEAD_INPUT_S:.0f}+ с. Если это не пауза в разговоре — проверьте клавишу "
+                "выключения микрофона (Fn + перечёркнутый микрофон) и ползунок «Ввод»; "
+                "некоторые драйверы сами глушат вход в тишине и это нормально"
             )
         slow_stage = any(v >= STAGE_REPORT_MS for v in self._stage_ms.values())
         if self._max_lag_ms < LAG_REPORT_MS and not slow_stage:
@@ -716,6 +727,9 @@ class MicSubtitles:
         self.echo_leaks = 0
         #: Последние озвученные переводы — эхо динамика узнаётся по тексту.
         self._spoken: deque[str] = deque(maxlen=SPOKEN_MEMORY)
+        #: Идёт ли сейчас сброс устаревшего аудио, и сколько всего сброшено.
+        self._dropping = False
+        self.dropped_ms = 0
 
     @property
     def speaking(self) -> bool:
@@ -853,9 +867,9 @@ class MicSubtitles:
         text = getattr(envelope.payload, "text", None)
         if not isinstance(text, str):
             return False
-        if is_garbage(text):
+        if is_garbage(text) or len(text) > MAX_SOURCE_CHARS:
             if envelope.type == EVENT_STT_FINAL:
-                logger.info("пропущен артефакт whisper: %r", text[:80])
+                logger.info("пропущен артефакт whisper (%d знаков): %r", len(text), text[:80])
             return True
         if looks_foreign(text, self._lang_src) or self._sounds_like_speaker(text):
             if envelope.type == EVENT_STT_FINAL:
@@ -886,6 +900,8 @@ class MicSubtitles:
                     self._t0 = time.perf_counter() - chunk.ts_ms / 1000.0
                 raw = chunk.samples
                 self._watchdog.note_input(float(np.abs(raw).max()) / 32768.0 if raw.size else 0.0)
+                if self._behind(chunk.ts_ms):
+                    continue
                 if self._aec is None:
                     yield chunk
                     continue
@@ -1060,6 +1076,28 @@ class MicSubtitles:
                 self._gate.release_at(self._stream_ms())
 
         return first_ms, (frames / TTS_FORMAT.sample_rate if frames else 0.0), first_at
+
+    def _behind(self, ts_ms: int) -> bool:
+        """Отстал ли этот чанк от реального времени настолько, что его лучше пропустить.
+
+        Пока конвейер перегружен, очередь захвата копится и переполняется, а
+        распознавание получает аудио, сказанное десятки секунд назад. Пропуск
+        устаревших чанков возвращает задержку в норму ценой куска речи, который
+        всё равно опоздал бы безнадёжно.
+        """
+        lag_ms = self._stream_ms() - ts_ms
+        if lag_ms <= MAX_AUDIO_LAG_MS:
+            if self._dropping:
+                self._dropping = False
+                self._print(
+                    f"     [конвейер догнал реальное время, пропущено {self.dropped_ms} мс]"
+                )
+            return False
+        if not self._dropping:
+            self._dropping = True
+            logger.warning("конвейер отстаёт на %d мс — пропускаю устаревшее аудио", lag_ms)
+        self.dropped_ms += 30  # чанк движка — 30 мс
+        return True
 
     def _note_reference(self, chunk: AudioChunk, sink: AudioSink) -> None:
         """Сообщить эхоподавителю, что и когда зазвучит в динамике.
