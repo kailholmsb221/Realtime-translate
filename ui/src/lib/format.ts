@@ -13,6 +13,29 @@ export const STREAM_LABEL: Record<Stream, string> = {
   out: "Вы",
 };
 
+/**
+ * Коды языков NLLB-200 (FLORES-200) — зеркало `NLLB_LANG_CODES` из
+ * `engine/translate/nllb.py`. Нужны только панели пайплайна, чтобы показать,
+ * в каком виде направление перевода уходит в модель.
+ */
+export const NLLB_LANG_CODE: Record<Lang, string> = {
+  ru: "rus_Cyrl",
+  en: "eng_Latn",
+  kk: "kaz_Cyrl",
+};
+
+/** `HH:MM:SS` от unix-времени события (панель пайплайна, лог событий). */
+export function formatClock(unixMs: number): string {
+  const d = new Date(unixMs);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Длительность в секундах с одним знаком: `4.1 с` (таймкоды фразы). */
+export function formatSeconds(ms: number): string {
+  return `${(Math.max(0, ms) / 1000).toFixed(1)} с`;
+}
+
 /** `mm:ss` от начала сессии (для транскрипта истории). */
 export function formatTimecode(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));

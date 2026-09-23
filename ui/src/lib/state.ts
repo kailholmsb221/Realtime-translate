@@ -20,6 +20,15 @@ export const TRANSCRIPT_WINDOW_MS = 5 * 60 * 1000;
 /** Сколько зафиксированных реплик держим в каждой ленте. */
 export const MAX_FINALS_PER_LANE = 200;
 
+/**
+ * Сколько промежуточных гипотез whisper храним на одну реплику.
+ * Нужны только панели пайплайна («как распознавал»), поэтому держим немного.
+ */
+export const MAX_PARTIALS_PER_UTTERANCE = 8;
+
+/** Сколько последних реплик показывает панель пайплайна. */
+export const PIPELINE_TRACE_SIZE = 30;
+
 /** Зафиксированная реплика (stt.final) + прикреплённый к ней перевод. */
 export interface Utterance {
   /** Локальный стабильный ключ для React. */
@@ -35,6 +44,23 @@ export interface Utterance {
   ts: number;
   translation: string | null;
   translationLang: Lang | null;
+  /**
+   * Промежуточные гипотезы whisper (`stt.partial`), накопленные до этого
+   * `stt.final`, в порядке поступления. Для панели пайплайна.
+   */
+  partials: string[];
+  /**
+   * Текст, который движок реально отдал в NLLB (`src_text` из
+   * `translation.ready`). Обычно совпадает с `text`; расхождение видно в панели
+   * пайплайна и означает, что между STT и MT текст изменили.
+   */
+  srcText: string | null;
+  /** Язык перевода, запрошенный у NLLB (`dst_lang`). */
+  translationLangRequested: Lang | null;
+  /** `ts` конверта `translation.ready`; `null` — перевод ещё не пришёл. */
+  translationTs: number | null;
+  /** `metrics.latency`, привязанная к этой реплике (порядок FIFO внутри потока). */
+  metrics: MetricsLatency | null;
 }
 
 /** Одна лента субтитров. */
@@ -42,6 +68,11 @@ export interface Lane {
   /** "Живая" строка из stt.partial; заменяется целиком, пропадает на stt.final. */
   live: { text: string; lang: Lang } | null;
   finals: Utterance[];
+  /**
+   * Гипотезы `stt.partial`, пришедшие после последнего `stt.final`: очередной
+   * final забирает их себе и очищает буфер.
+   */
+  partials: string[];
 }
 
 export interface AppState {
@@ -54,7 +85,7 @@ export interface AppState {
   seq: number;
 }
 
-const emptyLane = (): Lane => ({ live: null, finals: [] });
+const emptyLane = (): Lane => ({ live: null, finals: [], partials: [] });
 
 export const initialState: AppState = {
   session: { status: "idle", session_id: null, langs: { in: "en", out: "ru" }, voice_id: null },
@@ -72,6 +103,21 @@ function trim(finals: Utterance[]): Utterance[] {
   return finals.length > MAX_FINALS_PER_LANE
     ? finals.slice(finals.length - MAX_FINALS_PER_LANE)
     : finals;
+}
+
+/**
+ * Добавляет гипотезу whisper в буфер ленты.
+ *
+ * Повтор той же строки не пишем (движок может прислать одинаковый partial
+ * дважды), длину буфера ограничиваем — панель пайплайна показывает только
+ * последние шаги распознавания.
+ */
+function pushPartial(partials: string[], text: string): string[] {
+  if (partials.length > 0 && partials[partials.length - 1] === text) return partials;
+  const next = [...partials, text];
+  return next.length > MAX_PARTIALS_PER_UTTERANCE
+    ? next.slice(next.length - MAX_PARTIALS_PER_UTTERANCE)
+    : next;
 }
 
 /**
@@ -114,7 +160,12 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
   switch (envelope.type) {
     case "stt.partial": {
       const { stream, lang, text } = envelope.payload;
-      return withLane(next, stream, { ...next.lanes[stream], live: { text, lang } });
+      const lane = next.lanes[stream];
+      return withLane(next, stream, {
+        ...lane,
+        live: { text, lang },
+        partials: pushPartial(lane.partials, text),
+      });
     }
 
     case "stt.final": {
@@ -132,10 +183,17 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
         ts: envelope.ts,
         translation: null,
         translationLang: null,
+        // Гипотезы, накопленные до этой фразы, принадлежат именно ей.
+        partials: lane.partials,
+        srcText: null,
+        translationLangRequested: null,
+        translationTs: null,
+        metrics: null,
       };
       return withLane({ ...next, seq }, stream, {
         live: null,
         finals: trim([...lane.finals, utterance]),
+        partials: [],
       });
     }
 
@@ -159,6 +217,11 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
           ts: envelope.ts,
           translation: text,
           translationLang: dst_lang,
+          partials: [],
+          srcText: src_text,
+          translationLangRequested: dst_lang,
+          translationTs: envelope.ts,
+          metrics: null,
         };
         return withLane({ ...next, seq }, stream, {
           ...lane,
@@ -172,6 +235,10 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
         refUtteranceId: ref_utterance_id ?? finals[index].refUtteranceId,
         translation: text,
         translationLang: dst_lang,
+        // Что именно ушло в NLLB и что он вернул — для панели пайплайна.
+        srcText: src_text,
+        translationLangRequested: dst_lang,
+        translationTs: envelope.ts,
       };
       return withLane(next, stream, { ...lane, finals });
     }
@@ -207,7 +274,21 @@ export function reduce(state: AppState, envelope: Envelope): AppState {
 
     case "metrics.latency": {
       const metrics = envelope.payload;
-      return { ...next, metrics: { ...next.metrics, [metrics.stream]: metrics } };
+      const withStreamMetrics: AppState = {
+        ...next,
+        metrics: { ...next.metrics, [metrics.stream]: metrics },
+      };
+
+      // Движок публикует metrics.latency сразу после translation.ready той же
+      // фразы (engine/orchestrator/pipeline.py, один воркер на поток), поэтому
+      // замер относится к самой старой переведённой реплике без метрик.
+      const lane = withStreamMetrics.lanes[metrics.stream];
+      const index = lane.finals.findIndex((u) => u.translation !== null && u.metrics === null);
+      if (index === -1) return withStreamMetrics;
+
+      const finals = lane.finals.slice();
+      finals[index] = { ...finals[index], metrics };
+      return withLane(withStreamMetrics, metrics.stream, { ...lane, finals });
     }
 
     // tts.chunk — служебное аудио, UI игнорирует (но парсер его понимает).
@@ -237,6 +318,24 @@ export function selectTranscript(
   return STREAMS.flatMap((stream) => state.lanes[stream].finals)
     .filter((u) => u.ts >= from)
     .sort((a, b) => a.ts - b.ts || a.t_start_ms - b.t_start_ms);
+}
+
+/**
+ * Трасса пайплайна: последние реплики обоих потоков, новые сверху.
+ *
+ * Панель `/pipeline` показывает по каждой реплике всю цепочку — гипотезы и
+ * финал whisper, текст, ушедший в NLLB, и его перевод, — поэтому порядок здесь
+ * обратный ленте субтитров: свежее интереснее.
+ */
+export function selectPipelineTrace(
+  state: AppState,
+  options: { limit?: number } = {},
+): Utterance[] {
+  const limit = options.limit ?? PIPELINE_TRACE_SIZE;
+  const all = STREAMS.flatMap((stream) => state.lanes[stream].finals).sort(
+    (a, b) => b.ts - a.ts || b.t_start_ms - a.t_start_ms,
+  );
+  return limit >= 0 ? all.slice(0, limit) : all;
 }
 
 /** Сколько реплик всего зафиксировано (для отладочных индикаторов). */

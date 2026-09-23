@@ -56,8 +56,16 @@ export function StatusBar({ status, session, recording }: StatusBarProps) {
       ) : null}
 
       <Link
-        href="/history"
+        href="/pipeline"
+        title="Что распознал whisper, что ушло в NLLB и как он перевёл"
         className="ml-auto rounded px-1.5 py-0.5 text-slate-300 underline-offset-2 hover:text-sky-300 hover:underline"
+      >
+        Пайплайн
+      </Link>
+
+      <Link
+        href="/history"
+        className="rounded px-1.5 py-0.5 text-slate-300 underline-offset-2 hover:text-sky-300 hover:underline"
       >
         История
       </Link>
