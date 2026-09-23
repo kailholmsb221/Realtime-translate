@@ -125,6 +125,14 @@ WATCHDOG_TICK_S: Final[float] = 0.1
 LAG_REPORT_MS: Final[float] = 150.0
 STAGE_REPORT_MS: Final[float] = 20.0
 
+#: Пик сырого входа ниже этого — цифровая тишина, а не тихая комната: даже
+#: шум вентилятора даёт заметно больше. Так выглядит аппаратный mute
+#: микрофона (клавиша Fn на ноутбуке) или ползунок «Ввод» в нуле.
+DEAD_INPUT_PEAK: Final[float] = 1e-4
+
+#: Сколько секунд цифровой тишины подряд считаем «микрофон выключен».
+DEAD_INPUT_S: Final[float] = 5.0
+
 #: Порт WebSocket — тот же, что у движка, чтобы UI не перенастраивать.
 DEFAULT_WS_PORT: Final[int] = 8765
 DEFAULT_WS_HOST: Final[str] = "127.0.0.1"
@@ -444,7 +452,15 @@ class LoopWatchdog:
     Раз в ``report_every_s`` печатает сводку, если было за что зацепиться.
     """
 
-    __slots__ = ("_max_lag_ms", "_report_every_s", "_stage_ms", "_task", "printer")
+    __slots__ = (
+        "_dead_reported",
+        "_last_sound_at",
+        "_max_lag_ms",
+        "_report_every_s",
+        "_stage_ms",
+        "_task",
+        "printer",
+    )
 
     def __init__(self, printer: Any = print, report_every_s: float = 10.0) -> None:
         self.printer = printer
@@ -453,6 +469,27 @@ class LoopWatchdog:
         #: Максимальное время синхронных этапов за период, мс.
         self._stage_ms: dict[str, float] = {}
         self._task: asyncio.Task[None] | None = None
+        #: Когда вход последний раз содержал хоть какой-то сигнал.
+        self._last_sound_at: float | None = None
+        self._dead_reported = False
+
+    def note_input(self, peak: float) -> None:
+        """Сообщить пик сырого чанка микрофона (до усиления и AEC)."""
+        now = time.perf_counter()
+        if peak >= DEAD_INPUT_PEAK:
+            if self._dead_reported:
+                self.printer("[сторож] микрофон снова отдаёт сигнал")
+            self._last_sound_at = now
+            self._dead_reported = False
+        elif self._last_sound_at is None:
+            self._last_sound_at = now
+
+    @property
+    def input_dead(self) -> bool:
+        """Отдаёт ли микрофон цифровой ноль дольше ``DEAD_INPUT_S``."""
+        if self._last_sound_at is None:
+            return False
+        return time.perf_counter() - self._last_sound_at >= DEAD_INPUT_S
 
     def note(self, stage: str, elapsed_ms: float) -> None:
         """Запомнить длительность синхронного этапа (AEC, ресемплинг…)."""
@@ -482,6 +519,13 @@ class LoopWatchdog:
                 last_report = time.perf_counter()
 
     def _report(self) -> None:
+        if self.input_dead and not self._dead_reported:
+            self._dead_reported = True
+            self.printer(
+                "[сторож] МИКРОФОН ОТДАЁТ ЦИФРОВОЙ НОЛЬ уже "
+                f"{DEAD_INPUT_S:.0f}+ с: проверьте клавишу выключения микрофона "
+                "(Fn + перечёркнутый микрофон) и ползунок «Ввод» в настройках звука"
+            )
         slow_stage = any(v >= STAGE_REPORT_MS for v in self._stage_ms.values())
         if self._max_lag_ms < LAG_REPORT_MS and not slow_stage:
             self._max_lag_ms = 0.0
@@ -789,6 +833,8 @@ class MicSubtitles:
             async for chunk in source:
                 if self._t0 is None:
                     self._t0 = time.perf_counter() - chunk.ts_ms / 1000.0
+                raw = chunk.samples
+                self._watchdog.note_input(float(np.abs(raw).max()) / 32768.0 if raw.size else 0.0)
                 if self._aec is None:
                     yield chunk
                     continue

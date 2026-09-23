@@ -404,6 +404,32 @@ async def test_echo_in_latin_never_reaches_panel() -> None:
     assert app.echo_leaks > 0
 
 
+def test_watchdog_flags_dead_microphone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Цифровой ноль на входе дольше порога — явное сообщение, а не тишина в логе.
+
+    Ровно так и пропало полчаса: аппаратный mute микрофона выглядел как
+    «пользователь молчит».
+    """
+    lines: list[str] = []
+    watchdog = mic_subtitles.LoopWatchdog(printer=lines.append)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mic_subtitles.time, "perf_counter", lambda: clock["now"])
+
+    watchdog.note_input(0.02)  # живой сигнал
+    assert not watchdog.input_dead
+
+    for _ in range(10):
+        clock["now"] += 1.0
+        watchdog.note_input(0.0)  # цифровой ноль
+    assert watchdog.input_dead
+    watchdog._report()
+    assert any("ЦИФРОВОЙ НОЛЬ" in line for line in lines)
+
+    watchdog.note_input(0.03)
+    assert not watchdog.input_dead
+    assert any("снова отдаёт сигнал" in line for line in lines)
+
+
 def test_repetition_spam_filter() -> None:
     """Залипание на одном слове отсекается, короткие повторы — нет."""
     assert mic_subtitles.is_repetition_spam("No, no, no, no, no, no, no, no")
