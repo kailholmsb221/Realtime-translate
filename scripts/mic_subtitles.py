@@ -122,7 +122,12 @@ DEFAULT_WS_PORT: Final[int] = 8765
 DEFAULT_WS_HOST: Final[str] = "127.0.0.1"
 
 #: Пауза, закрывающая фразу, мс. Короче штатных 500 мс: субтитрам важнее темп.
-DEFAULT_SILENCE_MS: Final[int] = 400
+DEFAULT_SILENCE_MS: Final[int] = 300
+
+#: Сколько аудио до срабатывания VAD прихватить в фразу, мс. На тихом входе
+#: детектор открывается с опозданием, и штатных 300 мс не хватает — первое
+#: слово фразы теряется.
+DEFAULT_PREROLL_MS: Final[int] = 600
 
 #: Предельная длина фразы, мс. Обычно фраза закрывается паузой (см.
 #: ``DEFAULT_SILENCE_MS``), а этот потолок нужен для непрерывной речи. Ставить
@@ -140,6 +145,10 @@ DEFAULT_STALE_MS: Final[int] = 3_000
 #: ``stream_chunk_size`` XTTS: чем меньше, тем раньше слышен первый звук.
 #: Штатные 20 дают ~1.9 с до первого чанка — для разговора это много.
 DEFAULT_TTS_CHUNK_SIZE: Final[int] = 10
+
+#: Порог Silero VAD. Штатные 0.5 на тихом входе с усилением пропускают шум:
+#: whisper получает не-речь и выдаёт подписи звуков вместо слов.
+DEFAULT_VAD_THRESHOLD: Final[float] = 0.6
 
 #: beam search whisper. 1 — штатный быстрый режим движка; 2-3 точнее, но каждая
 #: фраза распознаётся заметно дольше, а задержка в разговоре важнее.
@@ -167,10 +176,61 @@ HALLUCINATIONS: Final[tuple[str, ...]] = (
 )
 
 
+#: Слова-«звуковые теги». Whisper учился на ютуб-субтитрах, где звуки
+#: подписывают отдельной строкой («СПОКОЙНАЯ МУЗЫКА», «АПЛОДИСМЕНТЫ»), и на
+#: шуме воспроизводит именно такие подписи.
+SOUND_TAGS: Final[frozenset[str]] = frozenset(
+    {
+        "музыка",
+        "музыки",
+        "музыкальная",
+        "мелодия",
+        "мелодии",
+        "спокойная",
+        "тревожная",
+        "динамичная",
+        "аплодисменты",
+        "смех",
+        "стон",
+        "вздох",
+        "кашель",
+        "шум",
+        "тишина",
+        "звонок",
+        "звук",
+        "звуки",
+        "играет",
+        "звучит",
+        "music",
+        "applause",
+        "laughter",
+        "silence",
+    }
+)
+
+#: Сколько слов максимум может быть в «звуковой» подписи.
+SOUND_TAG_MAX_WORDS: Final[int] = 4
+
+
 def is_hallucination(text: str) -> bool:
-    """Похоже ли распознанное на заученный артефакт whisper, а не на речь."""
-    low = text.strip().lower()
-    return any(marker in low for marker in HALLUCINATIONS)
+    """Похоже ли распознанное на артефакт whisper, а не на речь.
+
+    Три признака: заученные «титры», подпись звука целиком («СПОКОЙНАЯ
+    МУЗЫКА») и короткая фраза капсом — так модель помечает не-речь.
+    """
+    stripped = text.strip()
+    low = stripped.lower()
+    if any(marker in low for marker in HALLUCINATIONS):
+        return True
+
+    words = re.findall(r"\w+", low, flags=re.UNICODE)
+    if not words:
+        return False
+    if len(words) <= SOUND_TAG_MAX_WORDS and all(word in SOUND_TAGS for word in words):
+        return True
+    # Капсом whisper пишет именно звуки: живая реплика так не выглядит.
+    letters = [ch for ch in stripped if ch.isalpha()]
+    return bool(letters) and len(words) <= 3 and all(ch.isupper() for ch in letters)
 
 
 def is_repetition_spam(text: str, *, min_words: int = 6, max_unique_share: float = 0.25) -> bool:
@@ -411,6 +471,7 @@ class MicSubtitles:
         self._skip_hallucinations = skip_hallucinations
         self._stale_ms = stale_ms
         self._print = printer
+        self._queue: asyncio.Queue[Any] | None = None
         self._task: asyncio.Task[None] | None = None
         self._source: AudioSource | None = None
         self._sink: AudioSink | None = None
@@ -501,6 +562,7 @@ class MicSubtitles:
     async def _capture(self) -> None:
         """Читать микрофон и публиковать события распознавания."""
         queue: asyncio.Queue[tuple[Envelope, int, float] | None] = asyncio.Queue()
+        self._queue = queue
         worker = asyncio.create_task(self._worker(queue), name="mic-subtitles-worker")
         self._t0 = None
         failed = False
@@ -601,9 +663,13 @@ class MicSubtitles:
         # засекаем момент ПЕРВОГО чанка синтеза, а не конца проигрывания: пока
         # перевод дочитывается, задержка уже не растёт (так же в pipeline.py).
         waited_ms = round((time.perf_counter() - queued_at) * 1000)
-        if waited_ms > self._stale_ms:
-            # Очередь отстала: озвучка этой фразы прозвучит поверх следующей.
-            logger.info("фраза ждала %d мс — не озвучиваю, только текст", waited_ms)
+        backlog = self._queue.qsize() if self._queue is not None else 0
+        if waited_ms > self._stale_ms or backlog > 0:
+            # Отстаём: синтез идёт последовательно, и озвучка этой фразы легла
+            # бы поверх следующей. Голосом отдаём только ту фразу, что догнала
+            # реальное время; всё, что накопилось, уходит в панель текстом.
+            reason = f"ждала {waited_ms} мс" if backlog == 0 else f"в очереди ещё {backlog}"
+            logger.info("%s — не озвучиваю, только текст", reason)
             tts_ms, spoken_s, first_at = 0, 0.0, None
         else:
             tts_ms, spoken_s, first_at = await self._speak(text)
@@ -748,6 +814,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mic-index", type=int, default=None, help="номер устройства микрофона")
     parser.add_argument("--gain", type=float, default=1.0, help="усиление входа, разы")
     parser.add_argument(
+        "--preroll-ms",
+        type=int,
+        default=DEFAULT_PREROLL_MS,
+        help="сколько аудио до начала речи прихватывать в фразу (спасает первое слово)",
+    )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=DEFAULT_VAD_THRESHOLD,
+        help="порог Silero VAD: выше — меньше шума принимается за речь",
+    )
+    parser.add_argument(
         "--beam-size",
         type=int,
         default=DEFAULT_BEAM_SIZE,
@@ -819,6 +897,8 @@ async def _amain(args: argparse.Namespace) -> int:
         max_utterance_ms=args.max_phrase_ms,
         language=lang_src.value,
         beam_size=args.beam_size,
+        vad_threshold=args.vad_threshold,
+        preroll_ms=args.preroll_ms,
     )
     print("Загружаю модели (первый запуск — дольше, веса читаются с диска)…")
     stt = create_engine(stt_config, backend="faster_whisper", vad_backend="silero")
@@ -916,6 +996,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    # Эти двое печатают строку на каждый чанк и на каждое подключение UI —
+    # в терминале от них ничего не видно.
+    for noisy in ("faster_whisper", "websockets.server", "websockets.client"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         return asyncio.run(_amain(args))
     except KeyboardInterrupt:

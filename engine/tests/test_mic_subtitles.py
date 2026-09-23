@@ -353,6 +353,25 @@ def test_hallucination_filter() -> None:
     assert mic_subtitles.is_hallucination("Субтитры сделал DimaTorzok")
     assert mic_subtitles.is_hallucination("  ПРОДОЛЖЕНИЕ СЛЕДУЕТ...  ")
     assert not mic_subtitles.is_hallucination("привет, как слышно?")
+    assert not mic_subtitles.is_hallucination("Расскажи мне что-нибудь интересное")
+
+
+def test_sound_tags_are_hallucinations() -> None:
+    """Подписи звуков из ютуб-субтитров («СПОКОЙНАЯ МУЗЫКА») — не речь."""
+    assert mic_subtitles.is_hallucination("СПОКОЙНАЯ МУЗЫКА")
+    assert mic_subtitles.is_hallucination("спокойная мелодия")
+    assert mic_subtitles.is_hallucination("СТОН!")
+    assert mic_subtitles.is_hallucination("Редактор субтитров Н.Закомолдина")
+    # Слово «музыка» внутри живой фразы — не тег.
+    assert not mic_subtitles.is_hallucination("мне нравится эта музыка, включи громче")
+
+
+def test_repetition_spam_filter() -> None:
+    """Залипание на одном слове отсекается, короткие повторы — нет."""
+    assert mic_subtitles.is_repetition_spam("No, no, no, no, no, no, no, no")
+    assert mic_subtitles.is_repetition_spam("Субтитры субтитры субтитры субтитры субтитры субтитры")
+    assert not mic_subtitles.is_repetition_spam("да да")
+    assert not mic_subtitles.is_repetition_spam("Привет, как меня слышно сейчас, всё хорошо")
 
 
 def test_parser_defaults() -> None:
