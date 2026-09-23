@@ -19,6 +19,7 @@ from pathlib import Path
 import mic_subtitles
 import pytest
 import websockets
+from aec import EchoCanceller
 from websockets.asyncio.server import serve as ws_serve
 
 from engine.audio_io import ENGINE_FORMAT, FakeSink, FakeSource
@@ -62,6 +63,7 @@ def build_app(
     tts: object | None = None,
     sink: FakeSink | None = None,
     gate: mic_subtitles.HalfDuplexGate | None = None,
+    aec: EchoCanceller | None = None,
 ) -> mic_subtitles.MicSubtitles:
     """Режим на фейках: WAV вместо микрофона, фейковые whisper, NLLB и TTS."""
     config = SttConfig(min_silence_ms=200, max_utterance_ms=2_000, energy_threshold=0.01)
@@ -80,6 +82,7 @@ def build_app(
         tts=tts,  # type: ignore[arg-type]  # фейковый роутер того же интерфейса
         sink_factory=(None if sink is None else lambda: sink),
         gate=gate,
+        aec=aec,
         printer=lambda *_: None,
     )
 
@@ -315,6 +318,34 @@ def test_untranslated_output_is_not_spoken() -> None:
     assert mic_subtitles.looks_untranslated("hello there", Lang.RU)
     assert not mic_subtitles.looks_untranslated("привет", Lang.RU)
     assert not mic_subtitles.looks_untranslated("  ", Lang.EN)
+
+
+async def test_echo_cancellation_keeps_microphone_open() -> None:
+    """С эхоподавлением микрофон не глушится: говорить можно поверх перевода.
+
+    Полудуплекс тут не подключён вовсе — вместо него опорный сигнал озвучки
+    уходит в фильтр, и тот вычитает эхо из входа.
+    """
+    canceller = EchoCanceller(16_000)
+    sink = FakeSink()
+    provider = FakeProvider(table={(Lang.RU, Lang.EN, SPOKEN): "hello, can you hear me"})
+    app = build_app(
+        provider=provider,
+        tts=create_tts(TtsConfig(backend=TtsBackend.FAKE)),
+        sink=sink,
+        aec=canceller,
+    )
+
+    async with ws_serve(app.handle_client, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as client:
+            await asyncio.wait_for(client.recv(), timeout=WS_TIMEOUT)  # session.state idle
+            await app.start()
+            await collect(client, EVENT_METRICS_LATENCY)
+            await app.stop()
+
+    assert canceller.stats.blocks > 0, "микрофон должен идти через эхоподавитель"
+    assert sink.n_frames > 0, "перевод должен был прозвучать"
 
 
 def test_hallucination_filter() -> None:

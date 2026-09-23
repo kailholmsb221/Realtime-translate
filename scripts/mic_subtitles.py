@@ -10,9 +10,13 @@ loopback ловит её обратно, whisper распознаёт уже с�
 Что делает режим:
 
 * слушает только микрофон (поток ``out``), loopback не открывается вовсе;
-* озвучивает перевод в наушники/колонки (XTTS-v2); на время проигрывания
-  микрофон глушится полудуплексом, иначе whisper услышит сам себя.
-  ``--silent`` выключает озвучку совсем — тогда XTTS не загружается;
+* озвучивает перевод в наушники или колонки (XTTS-v2). ``--silent`` выключает
+  озвучку совсем — тогда XTTS не загружается;
+* на колонках эхо собственной озвучки вычитается из микрофона адаптивным
+  фильтром (``scripts/aec.py``), поэтому вход не глушится и речь поверх
+  перевода не теряется — наушники не нужны. Запасной вариант ``--half-duplex``
+  просто закрывает микрофон на время озвучки (и съедает сказанное в этот
+  момент), ``--no-aec`` отключает фильтр;
 * шлёт по WebSocket те же события контрактов (``stt.partial`` / ``stt.final`` /
   ``translation.ready`` / ``metrics.latency`` / ``session.state``) на том же
   порту, что и движок, поэтому UI подключается без изменений: страница
@@ -58,6 +62,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # запуск без установки пакета
     sys.path.insert(0, str(REPO_ROOT))
 
+from aec import EchoCanceller  # noqa: E402  — сосед по scripts/
+
 from engine.audio_io import (  # noqa: E402
     TTS_FORMAT,
     AudioChunk,
@@ -67,6 +73,7 @@ from engine.audio_io import (  # noqa: E402
     create_source,
 )
 from engine.audio_io.config import AudioConfig  # noqa: E402
+from engine.audio_io.pcm import resample  # noqa: E402
 from engine.contracts.events import (  # noqa: E402  — после правки sys.path
     COMMAND_SESSION_START,
     COMMAND_SESSION_STOP,
@@ -106,6 +113,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger("mic_subtitles")
+
+#: Частота потока внутри движка, Гц (CLAUDE.md, технический стандарт).
+ENGINE_RATE: Final[int] = 16_000
 
 #: Порт WebSocket — тот же, что у движка, чтобы UI не перенастраивать.
 DEFAULT_WS_PORT: Final[int] = 8765
@@ -355,8 +365,11 @@ class MicSubtitles:
         tts: синтез перевода; ``None`` — режим субтитров, ничего не звучит.
         sink_factory: куда играть перевод (наушники/колонки); нужен вместе с ``tts``.
         voice_id: профиль голоса; ``None`` — встроенный голос XTTS.
-        gate: полудуплекс — глушит микрофон на время озвучки (обязателен на
-            колонках, с наушниками можно ``None``).
+        gate: полудуплекс — глушит микрофон на время озвучки. С эхоподавлением
+            не нужен: микрофон остаётся открытым, и речь поверх перевода не
+            теряется.
+        aec: эхоподавление — вычитает из микрофона собственную озвучку, чтобы
+            работать на динамиках без наушников и без глушения входа.
         gain: усиление входа (1.0 — без изменений).
         skip_hallucinations: отбрасывать заученные «титры» whisper.
         stale_ms: фразу, дождавшуюся очереди позже этого, не озвучиваем —
@@ -377,6 +390,7 @@ class MicSubtitles:
         sink_factory: Any = None,
         voice_id: str | None = None,
         gate: HalfDuplexGate | None = None,
+        aec: EchoCanceller | None = None,
         gain: float = 1.0,
         skip_hallucinations: bool = True,
         stale_ms: int = DEFAULT_STALE_MS,
@@ -392,6 +406,7 @@ class MicSubtitles:
         self._sink_factory = sink_factory
         self._voice_id = voice_id
         self._gate = gate
+        self._aec = aec
         self._gain = gain
         self._skip_hallucinations = skip_hallucinations
         self._stale_ms = stale_ms
@@ -538,34 +553,13 @@ class MicSubtitles:
             async for chunk in source:
                 if self._t0 is None:
                     self._t0 = time.perf_counter() - chunk.ts_ms / 1000.0
-                samples = chunk.samples.astype(np.float32) / 32768.0
-                rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
-                self._input_rms = rms * self._gain
-                self._input_rms_at = time.perf_counter()
-                yield chunk
+                if self._aec is None:
+                    yield chunk
+                    continue
+                cleaned = self._aec.process(chunk.samples, chunk.ts_ms)
+                yield AudioChunk.from_array(cleaned, ts_ms=chunk.ts_ms, fmt=chunk.fmt)
 
         return timed()
-
-    def _hears_speech(self, threshold: float) -> bool:
-        """Говорит ли человек прямо сейчас (по свежему замеру уровня входа)."""
-        if time.perf_counter() - self._input_rms_at > STALE_LEVEL_S:
-            return False  # свежих чанков нет — судить не по чему
-        return self._input_rms >= threshold
-
-    async def _wait_quiet(self, timeout_s: float) -> None:
-        """Подождать паузу в речи, но не дольше ``timeout_s``.
-
-        Иначе перевод начинает звучать поверх следующей фразы, микрофон на это
-        время закрывается полудуплексом, и часть сказанного просто теряется.
-        """
-        if self._gate is None or timeout_s <= 0:
-            return
-        deadline = time.perf_counter() + timeout_s
-        while time.perf_counter() < deadline:
-            if not self._hears_speech(self._speech_rms):
-                return
-            await asyncio.sleep(0.05)
-        logger.info("человек говорит без пауз — озвучиваю поверх")
 
     async def _worker(self, queue: asyncio.Queue[tuple[Envelope, int, float] | None]) -> None:
         """Переводит фразы по очереди: распознавание не ждёт NLLB."""
@@ -670,6 +664,7 @@ class MicSubtitles:
                     first_ms = max(0, round((first_at - started) * 1000))
                 chunk = AudioChunk.from_array(pcm, ts_ms=0, fmt=TTS_FORMAT)
                 frames += chunk.n_frames
+                self._note_reference(chunk, sink)
                 await sink.write(chunk)
             with contextlib.suppress(Exception):
                 await sink.drain()
@@ -684,6 +679,23 @@ class MicSubtitles:
                 self._gate.release_at(self._stream_ms())
 
         return first_ms, (frames / TTS_FORMAT.sample_rate if frames else 0.0), first_at
+
+    def _note_reference(self, chunk: AudioChunk, sink: AudioSink) -> None:
+        """Сообщить эхоподавителю, что и когда зазвучит в динамике.
+
+        ``play_at`` намеренно занижен: берём «сейчас» плюс то, что ещё лежит в
+        буфере приёмника. Раньше этого момента чанк зазвучать не может, а
+        всё, что позже (латентность драйвера, путь до микрофона), — уже забота
+        адаптивного фильтра.
+        """
+        aec = self._aec
+        if aec is None:
+            return
+        buffered = int(getattr(sink, "buffered_frames", 0) or 0)
+        device_rate = int(getattr(sink, "device_sample_rate", 0) or TTS_FORMAT.sample_rate)
+        play_at_ms = self._stream_ms() + 1000.0 * buffered / device_rate
+        pcm16k = resample(chunk.samples, chunk.fmt.sample_rate, ENGINE_RATE)
+        aec.add_reference(pcm16k, play_at_ms)
 
     def _stream_ms(self) -> int:
         """Текущая точка на таймлайне потока, мс (0 — первый чанк микрофона)."""
@@ -783,10 +795,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="сколько держать микрофон закрытым после озвучки, мс",
     )
     parser.add_argument(
-        "--no-half-duplex",
-        dest="half_duplex",
+        "--half-duplex",
+        action="store_true",
+        help="вместо эхоподавления глушить микрофон на время озвучки "
+        "(речь поверх перевода при этом теряется)",
+    )
+    parser.add_argument(
+        "--no-aec",
+        dest="aec",
         action="store_false",
-        help="не глушить микрофон на время озвучки (можно только в наушниках)",
+        help="выключить эхоподавление (нужно, только если оно мешает)",
     )
     parser.add_argument("--log-level", default="WARNING")
     return parser
@@ -846,7 +864,10 @@ async def _amain(args: argparse.Namespace) -> int:
         logger.exception("не удалось померить уровень микрофона")
 
     broadcaster = Broadcaster()
-    gate = HalfDuplexGate(args.tail_ms) if (tts is not None and args.half_duplex) else None
+    speaking = tts is not None
+    gate = HalfDuplexGate(args.tail_ms) if (speaking and args.half_duplex) else None
+    # Эхоподавление и полудуплекс решают одну задачу; вместе не нужны.
+    canceller = EchoCanceller(ENGINE_RATE) if (speaking and args.aec and gate is None) else None
     app = MicSubtitles(
         stt,
         TranslationService(provider),
@@ -858,6 +879,7 @@ async def _amain(args: argparse.Namespace) -> int:
         sink_factory=(None if tts is None else lambda: create_sink("headphones", audio_config)),
         voice_id=args.voice_id,
         gate=gate,
+        aec=canceller,
         gain=args.gain,
         skip_hallucinations=not args.keep_hallucinations,
         stale_ms=args.stale_ms,
@@ -869,7 +891,12 @@ async def _amain(args: argparse.Namespace) -> int:
         if tts is not None:
             voice = args.voice_id or "XTTS по умолчанию"
             print(f"Перевод звучит в наушники/колонки, голос: {voice}")
-            if gate is not None:
+            if canceller is not None:
+                print(
+                    f"Эхоподавление включено (хвост {canceller.tail_ms} мс): микрофон слушает "
+                    "и во время озвучки, говорить можно поверх"
+                )
+            elif gate is not None:
                 print("Полудуплекс: микрофон молчит, пока играет перевод")
         await app.start()
         try:
