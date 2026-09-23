@@ -192,7 +192,7 @@ async def test_garbage_from_ui_is_ignored(
 
 
 async def test_whisper_hallucinations_are_not_translated() -> None:
-    """Заученные «титры» whisper не уходят в NLLB и не попадают в ленту."""
+    """Заученные «титры» whisper не уходят ни в NLLB, ни в панель."""
     provider = FakeProvider()
     app = build_app(text="Субтитры сделал DimaTorzok", provider=provider)
     async with ws_serve(app.handle_client, "127.0.0.1", 0) as server:
@@ -210,8 +210,10 @@ async def test_whisper_hallucinations_are_not_translated() -> None:
                 received.append(parse_event(raw))
             await app.stop()
 
-    assert any(e.type == EVENT_STT_FINAL for e in received), "фраза должна была распознаться"
-    assert all(e.type != EVENT_TRANSLATION_READY for e in received)
+    # Артефакт отсекается до публикации: в панели его нет ни финалом, ни переводом.
+    assert all(e.type not in (EVENT_STT_FINAL, EVENT_TRANSLATION_READY) for e in received), [
+        e.type for e in received
+    ]
     assert provider.calls == 0
     assert app.index == 0
 

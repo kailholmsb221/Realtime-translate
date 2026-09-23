@@ -117,6 +117,14 @@ logger = logging.getLogger("mic_subtitles")
 #: Частота потока внутри движка, Гц (CLAUDE.md, технический стандарт).
 ENGINE_RATE: Final[int] = 16_000
 
+#: Сколько событий держим на одного клиента UI, прежде чем ронять старые.
+CLIENT_QUEUE_SIZE: Final[int] = 512
+
+#: Сторож цикла событий: период проверки и пороги, с которых пишем сводку.
+WATCHDOG_TICK_S: Final[float] = 0.1
+LAG_REPORT_MS: Final[float] = 150.0
+STAGE_REPORT_MS: Final[float] = 20.0
+
 #: Порт WebSocket — тот же, что у движка, чтобы UI не перенастраивать.
 DEFAULT_WS_PORT: Final[int] = 8765
 DEFAULT_WS_HOST: Final[str] = "127.0.0.1"
@@ -148,7 +156,11 @@ DEFAULT_TTS_CHUNK_SIZE: Final[int] = 10
 
 #: Порог Silero VAD. Штатные 0.5 на тихом входе с усилением пропускают шум:
 #: whisper получает не-речь и выдаёт подписи звуков вместо слов.
-DEFAULT_VAD_THRESHOLD: Final[float] = 0.6
+DEFAULT_VAD_THRESHOLD: Final[float] = 0.7
+
+#: Минимальная длина речи, мс. Штатные 250 мс пропускают всплески шума
+#: вентилятора — whisper потом пишет их как «ссссссс».
+DEFAULT_MIN_SPEECH_MS: Final[int] = 400
 
 #: beam search whisper. 1 — штатный быстрый режим движка; 2-3 точнее, но каждая
 #: фраза распознаётся заметно дольше, а задержка в разговоре важнее.
@@ -211,6 +223,9 @@ SOUND_TAGS: Final[frozenset[str]] = frozenset(
 #: Сколько слов максимум может быть в «звуковой» подписи.
 SOUND_TAG_MAX_WORDS: Final[int] = 4
 
+#: Пять и больше одинаковых букв подряд: в речи так не бывает, в шуме — всегда.
+RUN_OF_ONE_LETTER: Final[re.Pattern[str]] = re.compile(r"(\w)\1{4,}", re.UNICODE)
+
 
 def is_hallucination(text: str) -> bool:
     """Похоже ли распознанное на артефакт whisper, а не на речь.
@@ -227,6 +242,9 @@ def is_hallucination(text: str) -> bool:
     if not words:
         return False
     if len(words) <= SOUND_TAG_MAX_WORDS and all(word in SOUND_TAGS for word in words):
+        return True
+    # «ссссссс», «Ааааааа», «шшшшш» — так whisper записывает шум вентилятора.
+    if any(RUN_OF_ONE_LETTER.search(word) for word in words):
         return True
     # Капсом whisper пишет именно звуки: живая реплика так не выглядит.
     letters = [ch for ch in stripped if ch.isalpha()]
@@ -322,34 +340,124 @@ def build_mic(config: AudioConfig, index: int | None) -> AudioSource:
 
 
 class Broadcaster:
-    """Раздаёт конверты всем подключённым клиентам UI."""
+    """Раздаёт конверты всем подключённым клиентам UI, не тормозя конвейер.
 
-    __slots__ = ("_clients",)
+    ``publish`` никогда не ждёт сеть: у каждого клиента своя очередь и своя
+    задача-отправитель. Если браузер не успевает (вкладка в фоне, панель
+    перерисовывается), его очередь переполняется и самые старые события
+    выбрасываются — так же, как это делает шина движка. Иначе ``await send``
+    в цикле захвата встал бы вместе с браузером, а микрофон за это время
+    переполнил бы очередь и потерял чанки.
+    """
+
+    __slots__ = ("_queues", "_senders", "dropped")
 
     def __init__(self) -> None:
-        self._clients: set[ServerConnection] = set()
+        self._queues: dict[ServerConnection, asyncio.Queue[str]] = {}
+        self._senders: dict[ServerConnection, asyncio.Task[None]] = {}
+        #: Сколько событий выброшено из-за медленных клиентов.
+        self.dropped = 0
 
     @property
     def clients(self) -> int:
         """Сколько UI сейчас подключено."""
-        return len(self._clients)
+        return len(self._queues)
 
     def add(self, connection: ServerConnection) -> None:
-        """Запомнить нового клиента."""
-        self._clients.add(connection)
+        """Запомнить нового клиента и завести ему отправителя."""
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE)
+        self._queues[connection] = queue
+        self._senders[connection] = asyncio.create_task(
+            self._pump(connection, queue), name="mic-subtitles-sender"
+        )
 
     def discard(self, connection: ServerConnection) -> None:
         """Забыть отключившегося клиента."""
-        self._clients.discard(connection)
+        self._queues.pop(connection, None)
+        sender = self._senders.pop(connection, None)
+        if sender is not None and not sender.done():
+            sender.cancel()
 
     async def publish(self, envelope: Envelope) -> None:
-        """Отправить конверт всем; отвалившиеся клиенты просто выбрасываются."""
+        """Положить конверт в очереди всех клиентов (без ожидания сети)."""
         raw = to_json(envelope)
-        for connection in list(self._clients):
-            try:
+        for queue in list(self._queues.values()):
+            if queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                self.dropped += 1
+            queue.put_nowait(raw)
+
+    async def _pump(self, connection: ServerConnection, queue: asyncio.Queue[str]) -> None:
+        """Отправлять события клиенту по одному, пока он жив."""
+        try:
+            while True:
+                raw = await queue.get()
                 await connection.send(raw)
-            except Exception:  # клиент мог закрыться в любой момент
-                self._clients.discard(connection)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # клиент мог закрыться в любой момент
+            self.discard(connection)
+
+
+class LoopWatchdog:
+    """Сторож цикла событий: меряет, насколько поздно просыпается задача.
+
+    Если ``asyncio.sleep(0.1)`` просыпается через 0.5 с — цикл был занят
+    чем-то синхронным 400 мс, и микрофонная очередь за это время росла.
+    Раз в ``report_every_s`` печатает сводку, если было за что зацепиться.
+    """
+
+    __slots__ = ("_max_lag_ms", "_report_every_s", "_stage_ms", "_task", "printer")
+
+    def __init__(self, printer: Any = print, report_every_s: float = 10.0) -> None:
+        self.printer = printer
+        self._report_every_s = report_every_s
+        self._max_lag_ms = 0.0
+        #: Максимальное время синхронных этапов за период, мс.
+        self._stage_ms: dict[str, float] = {}
+        self._task: asyncio.Task[None] | None = None
+
+    def note(self, stage: str, elapsed_ms: float) -> None:
+        """Запомнить длительность синхронного этапа (AEC, ресемплинг…)."""
+        if elapsed_ms > self._stage_ms.get(stage, 0.0):
+            self._stage_ms[stage] = elapsed_ms
+
+    def start(self) -> None:
+        """Запустить сторожа."""
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name="mic-subtitles-watchdog")
+
+    def stop(self) -> None:
+        """Остановить сторожа."""
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+
+    async def _run(self) -> None:
+        last_report = time.perf_counter()
+        while True:
+            before = time.perf_counter()
+            await asyncio.sleep(WATCHDOG_TICK_S)
+            lag_ms = (time.perf_counter() - before - WATCHDOG_TICK_S) * 1000
+            self._max_lag_ms = max(self._max_lag_ms, lag_ms)
+            if time.perf_counter() - last_report >= self._report_every_s:
+                self._report()
+                last_report = time.perf_counter()
+
+    def _report(self) -> None:
+        slow_stage = any(v >= STAGE_REPORT_MS for v in self._stage_ms.values())
+        if self._max_lag_ms < LAG_REPORT_MS and not slow_stage:
+            self._max_lag_ms = 0.0
+            self._stage_ms.clear()
+            return
+        stages = ", ".join(f"{k} {v:.0f} мс" for k, v in sorted(self._stage_ms.items()))
+        self.printer(
+            f"[сторож] лаг цикла событий до {self._max_lag_ms:.0f} мс"
+            + (f"; этапы: {stages}" if stages else "")
+        )
+        self._max_lag_ms = 0.0
+        self._stage_ms.clear()
 
 
 class HalfDuplexGate:
@@ -472,6 +580,7 @@ class MicSubtitles:
         self._stale_ms = stale_ms
         self._print = printer
         self._queue: asyncio.Queue[Any] | None = None
+        self._watchdog = LoopWatchdog(printer)
         self._task: asyncio.Task[None] | None = None
         self._source: AudioSource | None = None
         self._sink: AudioSink | None = None
@@ -525,6 +634,7 @@ class MicSubtitles:
         if lang_dst is not None:
             self._lang_dst = lang_dst
         self._translation.reset(Stream.OUT)
+        self._watchdog.start()
         self._task = asyncio.create_task(self._capture(), name="mic-subtitles")
         await self._bus.publish(self.state(SessionStatus.RUNNING))
         mode = "перевод озвучивается" if self.speaking else "только текст, без звука"
@@ -534,6 +644,7 @@ class MicSubtitles:
 
     async def stop(self) -> None:
         """Остановить захват и сообщить UI ``idle``."""
+        self._watchdog.stop()
         await self._halt()
         await self._bus.publish(self.state(SessionStatus.IDLE))
 
@@ -580,6 +691,10 @@ class MicSubtitles:
             if self._gate is not None:
                 stream = self._gate.wrap(stream)
             async for envelope in self._stt.run(stream, Stream.OUT, self._lang_src.value):
+                if self._skip_hallucinations and self._is_noise(envelope):
+                    # Артефакт whisper на шуме: в панель не показываем вовсе,
+                    # иначе лента забита «субтитрами» и «ссссссс».
+                    continue
                 await self._bus.publish(envelope)
                 if envelope.type == EVENT_STT_FINAL:
                     queue.put_nowait(
@@ -603,6 +718,17 @@ class MicSubtitles:
             self._print("\n=== Источник звука пропал, переоткрываю микрофон… ===")
             self._task = asyncio.create_task(self._capture(), name="mic-subtitles")
 
+    def _is_noise(self, envelope: Envelope) -> bool:
+        """Похоже ли событие распознавания на артефакт, а не на речь."""
+        text = getattr(envelope.payload, "text", None)
+        if not isinstance(text, str):
+            return False
+        if is_hallucination(text) or is_repetition_spam(text):
+            if envelope.type == EVENT_STT_FINAL:
+                logger.info("пропущен артефакт whisper: %r", text[:80])
+            return True
+        return False
+
     def _timed(self, source: Any) -> AsyncIterator[AudioChunk]:
         """Привязать таймлайн потока к часам процесса и мерить уровень входа.
 
@@ -618,7 +744,9 @@ class MicSubtitles:
                 if self._aec is None:
                     yield chunk
                     continue
+                started = time.perf_counter()
                 cleaned = self._aec.process(chunk.samples, chunk.ts_ms)
+                self._watchdog.note("aec", (time.perf_counter() - started) * 1000)
                 yield AudioChunk.from_array(cleaned, ts_ms=chunk.ts_ms, fmt=chunk.fmt)
 
         return timed()
@@ -639,12 +767,6 @@ class MicSubtitles:
     async def _handle_final(self, envelope: Envelope, stt_ms: int, queued_at: float) -> None:
         payload = envelope.payload
         if not isinstance(payload, SttFinal):  # pragma: no cover — чужое событие
-            return
-        if self._skip_hallucinations and is_hallucination(payload.text):
-            logger.info("пропущен артефакт whisper: %r", payload.text)
-            return
-        if self._skip_hallucinations and is_repetition_spam(payload.text):
-            logger.info("пропущено залипание whisper: %r", payload.text[:80])
             return
 
         self.index += 1
@@ -760,8 +882,10 @@ class MicSubtitles:
         buffered = int(getattr(sink, "buffered_frames", 0) or 0)
         device_rate = int(getattr(sink, "device_sample_rate", 0) or TTS_FORMAT.sample_rate)
         play_at_ms = self._stream_ms() + 1000.0 * buffered / device_rate
+        started = time.perf_counter()
         pcm16k = resample(chunk.samples, chunk.fmt.sample_rate, ENGINE_RATE)
         aec.add_reference(pcm16k, play_at_ms)
+        self._watchdog.note("reference", (time.perf_counter() - started) * 1000)
 
     def _stream_ms(self) -> int:
         """Текущая точка на таймлайне потока, мс (0 — первый чанк микрофона)."""
@@ -818,6 +942,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_PREROLL_MS,
         help="сколько аудио до начала речи прихватывать в фразу (спасает первое слово)",
+    )
+    parser.add_argument(
+        "--min-speech-ms",
+        type=int,
+        default=DEFAULT_MIN_SPEECH_MS,
+        help="короче этого речью не считается (отсекает щелчки и шипение)",
     )
     parser.add_argument(
         "--vad-threshold",
@@ -899,6 +1029,7 @@ async def _amain(args: argparse.Namespace) -> int:
         beam_size=args.beam_size,
         vad_threshold=args.vad_threshold,
         preroll_ms=args.preroll_ms,
+        min_speech_ms=args.min_speech_ms,
     )
     print("Загружаю модели (первый запуск — дольше, веса читаются с диска)…")
     stt = create_engine(stt_config, backend="faster_whisper", vad_backend="silero")
