@@ -146,6 +146,18 @@ def test_quiet_reference_does_not_blow_up_weights() -> None:
     assert erle_db(echo[tail_from : len(cleaned)], cleaned[tail_from:]) > 6.0
 
 
+def test_delay_estimate_finds_the_echo_lag() -> None:
+    """Оценка задержки находит, на сколько эхо отстаёт от опорного сигнала."""
+    reference = speech_like(4.0, seed=21)
+    echo = np.convolve(reference, room_impulse(delay_ms=180.0), mode="full")[: len(reference)]
+    canceller = EchoCanceller(RATE)
+    run(canceller, reference, echo)
+
+    lag_ms, corr = canceller.estimate_delay()
+    assert corr > 0.3, f"эхо должно коррелировать с опорным сигналом, корр {corr:.2f}"
+    assert 120 <= lag_ms <= 260, f"ожидал лаг около 180 мс, получил {lag_ms}"
+
+
 def test_reset_forgets_everything() -> None:
     """После reset фильтр чист — например, сменили устройство вывода."""
     reference = speech_like(2.0, seed=5)

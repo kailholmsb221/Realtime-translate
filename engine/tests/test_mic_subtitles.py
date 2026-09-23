@@ -430,6 +430,45 @@ def test_watchdog_flags_dead_microphone(monkeypatch: pytest.MonkeyPatch) -> None
     assert any("снова отдаёт сигнал" in line for line in lines)
 
 
+def test_group_repetition_is_garbage() -> None:
+    """Зацикливание на группе букв — мусор, даже если это одно «слово»."""
+    assert mic_subtitles.is_hallucination(
+        "үйтіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңіңі"
+    )
+    assert mic_subtitles.is_hallucination("lalalalalala")
+    assert mic_subtitles.is_garbage("Құр ұр ұр ұр ұр ұр ұр ұр ұр ұр")
+    assert not mic_subtitles.is_hallucination("Мама мыла раму")
+    assert not mic_subtitles.is_hallucination("Сәлеметсіз бе, қалыңыз қалай")
+
+
+def test_speaker_echo_is_recognised_by_text() -> None:
+    """Собственный перевод, вернувшийся через динамик, узнаётся по тексту.
+
+    Для пары kk ↔ ru проверка по алфавиту бессильна — оба кириллические, и
+    без этой защиты режим уходил в петлю «и дом твой, и дом твой…».
+    """
+    app = build_app()
+    app._spoken.append("и дом твой, и дом твой, и дом твой")
+    echo = mic_subtitles.Envelope.wrap(
+        mic_subtitles.SttFinal(
+            stream=Stream.OUT,
+            lang=Lang.KK,
+            text="и дом твой и дом твой",
+            t_start_ms=0,
+            t_end_ms=900,
+        )
+    )
+    speech = mic_subtitles.Envelope.wrap(
+        mic_subtitles.SttFinal(
+            stream=Stream.OUT, lang=Lang.KK, text="бүгін ауа райы жақсы", t_start_ms=0, t_end_ms=900
+        )
+    )
+    assert app._is_noise(echo)
+    assert not app._is_noise(speech)
+    assert mic_subtitles.similarity("Hey, what's up?", "hey what's up") > 0.8
+    assert mic_subtitles.similarity("совсем другая фраза", "hello there") < 0.3
+
+
 def test_repetition_spam_filter() -> None:
     """Залипание на одном слове отсекается, короткие повторы — нет."""
     assert mic_subtitles.is_repetition_spam("No, no, no, no, no, no, no, no")

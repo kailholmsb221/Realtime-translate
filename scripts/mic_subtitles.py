@@ -44,10 +44,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import difflib
 import logging
 import re
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -241,6 +243,22 @@ SOUND_TAG_MAX_WORDS: Final[int] = 4
 #: Пять и больше одинаковых букв подряд: в речи так не бывает, в шуме — всегда.
 RUN_OF_ONE_LETTER: Final[re.Pattern[str]] = re.compile(r"(\w)\1{4,}", re.UNICODE)
 
+#: Группа из 1-4 букв, повторённая четыре и больше раз подряд («іңіңіңіңіңің»,
+#: «lalalala»): так whisper зацикливается, пока не кончится лимит токенов.
+RUN_OF_GROUP: Final[re.Pattern[str]] = re.compile(r"(\w{1,4}?)\1{3,}", re.UNICODE)
+
+#: Длиннее этого перевод не озвучиваем: живая фраза в 7 с даёт 150-200 знаков,
+#: всё, что заметно больше, — размноженный повторами мусор, XTTS читал бы его
+#: полминуты, а микрофон всё это время слушал бы динамик.
+MAX_SPOKEN_CHARS: Final[int] = 350
+
+#: Сколько последних озвученных переводов помним для защиты от эха по тексту.
+SPOKEN_MEMORY: Final[int] = 6
+
+#: Похожесть распознанного на недавно озвученное (0..1), с которой считаем
+#: его эхом динамика, а не речью человека.
+ECHO_SIMILARITY: Final[float] = 0.55
+
 
 def is_hallucination(text: str) -> bool:
     """Похоже ли распознанное на артефакт whisper, а не на речь.
@@ -258,8 +276,9 @@ def is_hallucination(text: str) -> bool:
         return False
     if len(words) <= SOUND_TAG_MAX_WORDS and all(word in SOUND_TAGS for word in words):
         return True
-    # «ссссссс», «Ааааааа», «шшшшш» — так whisper записывает шум вентилятора.
-    if any(RUN_OF_ONE_LETTER.search(word) for word in words):
+    # «ссссссс», «Ааааааа», «шшшшш» — так whisper записывает шум вентилятора,
+    # «іңіңіңіңің» — так он зацикливается на группе букв.
+    if any(RUN_OF_ONE_LETTER.search(word) or RUN_OF_GROUP.search(word) for word in words):
         return True
     # Капсом whisper пишет именно звуки: живая реплика так не выглядит.
     letters = [ch for ch in stripped if ch.isalpha()]
@@ -277,6 +296,28 @@ def is_repetition_spam(text: str, *, min_words: int = 6, max_unique_share: float
     if len(words) < min_words:
         return False
     return len(set(words)) / len(words) <= max_unique_share
+
+
+def is_garbage(text: str) -> bool:
+    """Мусор whisper любого вида: титры, звуковые теги, повторы букв и слов."""
+    return is_hallucination(text) or is_repetition_spam(text)
+
+
+def similarity(a: str, b: str) -> float:
+    """Похожесть двух фраз (0..1) — по общим словам и по символам.
+
+    Берётся максимум из доли общих слов и посимвольной близости: эхо через
+    динамик теряет окончания и обрывает края, поэтому одного признака мало.
+    """
+    la, lb = a.lower().strip(), b.lower().strip()
+    if not la or not lb:
+        return 0.0
+    wa, wb = (
+        set(re.findall(r"\w+", la, flags=re.UNICODE)),
+        set(re.findall(r"\w+", lb, flags=re.UNICODE)),
+    )
+    jaccard = len(wa & wb) / len(wa | wb) if (wa or wb) else 0.0
+    return max(jaccard, difflib.SequenceMatcher(None, la, lb).ratio())
 
 
 def looks_foreign(text: str, src: Lang) -> bool:
@@ -673,6 +714,8 @@ class MicSubtitles:
         self.index = 0
         #: Сколько раз whisper поймал остаток собственной озвучки.
         self.echo_leaks = 0
+        #: Последние озвученные переводы — эхо динамика узнаётся по тексту.
+        self._spoken: deque[str] = deque(maxlen=SPOKEN_MEMORY)
 
     @property
     def speaking(self) -> bool:
@@ -810,16 +853,24 @@ class MicSubtitles:
         text = getattr(envelope.payload, "text", None)
         if not isinstance(text, str):
             return False
-        if is_hallucination(text) or is_repetition_spam(text):
+        if is_garbage(text):
             if envelope.type == EVENT_STT_FINAL:
                 logger.info("пропущен артефакт whisper: %r", text[:80])
             return True
-        if looks_foreign(text, self._lang_src):
+        if looks_foreign(text, self._lang_src) or self._sounds_like_speaker(text):
             if envelope.type == EVENT_STT_FINAL:
                 logger.info("похоже на эхо озвучки, пропущено: %r", text[:80])
                 self.echo_leaks += 1
             return True
         return False
+
+    def _sounds_like_speaker(self, text: str) -> bool:
+        """Не наш ли это собственный перевод, вернувшийся через динамик.
+
+        Работает для любой пары языков — в отличие от проверки по алфавиту,
+        которая бессильна, когда оба языка кириллические (kk ↔ ru).
+        """
+        return any(similarity(text, spoken) >= ECHO_SIMILARITY for spoken in self._spoken)
 
     def _timed(self, source: Any) -> AsyncIterator[AudioChunk]:
         """Привязать таймлайн потока к часам процесса и мерить уровень входа.
@@ -943,6 +994,8 @@ class MicSubtitles:
             erle = st.erle_db
             voiced += f", эхо {erle:+.0f} дБ" if erle < 3 else f", эхо подавлено на {erle:.0f} дБ"
             voiced += f" [блоков громче: {st.rejected}, сжатий весов: {st.leaked}]"
+            lag_ms, corr = self._aec.estimate_delay()
+            voiced += f", реальная задержка эха {lag_ms:+d} мс (корр {corr:.2f})"
         self._print(
             f"     [{job.index:02d}]  (stt {stt_ms} мс, mt {mt_ms} мс, tts {tts_ms} мс, "
             f"итого {total_ms} мс{voiced})"
@@ -965,6 +1018,11 @@ class MicSubtitles:
         if source and text.strip().lower() == source.strip().lower():
             logger.info("перевод совпал с исходником, не озвучиваю: %r", text)
             return 0, 0.0, None
+        if is_garbage(text) or len(text) > MAX_SPOKEN_CHARS:
+            # NLLB честно размножил повторы whisper: читать это полминуты
+            # незачем, а микрофон всё это время слушал бы динамик.
+            logger.info("перевод похож на мусор (%d знаков), не озвучиваю", len(text))
+            return 0, 0.0, None
         if looks_untranslated(text, self._lang_dst):
             # NLLB иногда возвращает исходную фразу как есть (обрывок, шум).
             # Озвучивать её незачем: в панели она видна, а в динамик уйдёт
@@ -974,6 +1032,7 @@ class MicSubtitles:
 
         if self._gate is not None:
             self._gate.mute_from(self._stream_ms())
+        self._spoken.append(text)
 
         started = time.perf_counter()
         first_ms = 0

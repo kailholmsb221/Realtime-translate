@@ -95,6 +95,12 @@ WEIGHT_LIMIT: Final[float] = 8.0
 #: Как сжимаем веса при расхождении (множитель).
 LEAK: Final[float] = 0.5
 
+#: Сколько секунд сырого микрофона держим для оценки задержки эха и в каком
+#: диапазоне лагов её искать (отрицательный лаг — эхо пришло раньше, чем мы
+#: пометили опорный сигнал, и причинный фильтр его не достанет).
+DELAY_PROBE_S: Final[float] = 3.0
+DELAY_LAG_MS: Final[tuple[int, int]] = (-800, 1500)
+
 #: Пределы измеренной ERLE, дБ: один нелепый блок не должен утащить оценку.
 ERLE_CLIP_DB: Final[tuple[float, float]] = (-20.0, 60.0)
 
@@ -146,6 +152,8 @@ class EchoCanceller:
     __slots__ = (
         "_block",
         "_freq_bins",
+        "_mic_tail",
+        "_mic_tail_pos",
         "_mu",
         "_partitions",
         "_pending",
@@ -198,6 +206,9 @@ class EchoCanceller:
         #: Необработанный хвост входа и его абсолютная позиция.
         self._pending = np.zeros(0, dtype=np.float32)
         self._pending_pos = 0
+        #: Последние секунды сырого микрофона — для оценки реальной задержки эха.
+        self._mic_tail = np.zeros(int(sample_rate * DELAY_PROBE_S), dtype=np.float32)
+        self._mic_tail_pos = 0
         self.stats = AecStats()
 
     # --- опорный сигнал ----------------------------------------------------
@@ -289,6 +300,7 @@ class EchoCanceller:
             return np.zeros(0, dtype=np.int16)
 
         position = round(ts_ms * self._sample_rate / 1000)
+        self._remember_mic(samples, position)
         if self._pending.size == 0:
             self._pending_pos = position
         self._pending = np.concatenate([self._pending, samples])
@@ -399,12 +411,67 @@ class EchoCanceller:
             self.stats.erle_db = max(ERLE_CLIP_DB[0], self.stats.erle_db - 3.0)
         return output
 
+    def _remember_mic(self, samples: Float32Array, position: int) -> None:
+        """Положить сырой микрофон в кольцо для оценки задержки."""
+        n = self._mic_tail.size
+        for offset in range(0, samples.size, n):
+            piece = samples[offset : offset + n]
+            start = (position + offset) % n
+            take = min(piece.size, n - start)
+            self._mic_tail[start : start + take] = piece[:take]
+            if take < piece.size:
+                self._mic_tail[: piece.size - take] = piece[take:]
+        self._mic_tail_pos = position + samples.size
+
+    def estimate_delay(self) -> tuple[int, float]:
+        """Оценить реальную задержку эха по огибающим микрофона и опорного сигнала.
+
+        Returns:
+            ``(лаг в мс, коэффициент корреляции)``. Лаг — на сколько микрофон
+            отстаёт от опорного сигнала; корреляция ниже ~0.2 значит, что эхо в
+            микрофоне вообще не похоже на то, что мы считаем опорным сигналом.
+        """
+        n = self._mic_tail.size
+        end = self._mic_tail_pos
+        start = end - n
+        if start < 0 or end <= 0:
+            return 0, 0.0
+        roll = end % n
+        mic = np.concatenate([self._mic_tail[roll:], self._mic_tail[:roll]])
+        lo, hi = DELAY_LAG_MS
+        lo_s, hi_s = lo * self._sample_rate // 1000, hi * self._sample_rate // 1000
+        ref = self._reference(start - hi_s, n + hi_s - lo_s)
+
+        # Огибающие по 4 мс — лаг ищется по энергии, а не по фазе: устойчиво к
+        # искажениям тракта и дёшево.
+        hop = max(1, self._sample_rate // 250)
+
+        def envelope(x: Float32Array) -> Float32Array:
+            m = (x.size // hop) * hop
+            e = np.sqrt(np.mean(x[:m].reshape(-1, hop) ** 2, axis=1))
+            return (e - e.mean()) / (e.std() + 1e-9)
+
+        em = envelope(mic)
+        er = envelope(ref)
+        if em.size == 0 or er.size <= em.size:
+            return 0, 0.0
+        # er покрывает [start - hi, end - lo): сдвиг k соответствует лагу hi - k*hop.
+        best_lag, best_corr = 0, 0.0
+        for k in range(0, er.size - em.size + 1):
+            corr = float(np.dot(em, er[k : k + em.size])) / em.size
+            if corr > best_corr:
+                best_corr = corr
+                best_lag = hi_s - k * hop
+        return round(best_lag * 1000 / self._sample_rate), best_corr
+
     def reset(self) -> None:
         """Забыть накопленное (смена устройства, новая сессия)."""
         self._weights[:] = 0
         self._spectra[:] = 0
         self._ref_powers[:] = 0.0
         self._power[:] = 0.0
+        self._mic_tail[:] = 0.0
+        self._mic_tail_pos = 0
         self._ref[:] = 0.0
         self._ref_end = 0
         self._pending = np.zeros(0, dtype=np.float32)
