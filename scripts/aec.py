@@ -86,11 +86,14 @@ POWER_SMOOTHING: Final[float] = 0.7
 #: вывод не используем, а веса плавно забываем.
 DIVERGENCE_RATIO: Final[float] = 1.5
 
-#: Столько блоков подряд «громче входа» считаем устойчивым расхождением.
-DIVERGENCE_STREAK: Final[int] = 20
+#: Предел модуля веса. Путь «динамик → микрофон» ослабляет сигнал, поэтому
+#: честные веса по модулю невелики; если вес перевалил за этот порог, фильтр
+#: расходится — по энергии одного блока это не отличить от сходимости, а по
+#: норме весов видно сразу.
+WEIGHT_LIMIT: Final[float] = 8.0
 
-#: Как быстро забываем веса при устойчивом расхождении (множитель на блок).
-LEAK: Final[float] = 0.7
+#: Как сжимаем веса при расхождении (множитель).
+LEAK: Final[float] = 0.5
 
 #: Пределы измеренной ERLE, дБ: один нелепый блок не должен утащить оценку.
 ERLE_CLIP_DB: Final[tuple[float, float]] = (-20.0, 60.0)
@@ -121,6 +124,8 @@ class AecStats:
     double_talk: int = 0
     #: Блоков, где фильтр сделал громче и его вывод отброшен.
     rejected: int = 0
+    #: Сколько раз веса сжимались из-за расхождения.
+    leaked: int = 0
     #: Скользящая оценка подавления эха, дБ.
     erle_db: float = 0.0
 
@@ -141,7 +146,6 @@ class EchoCanceller:
     __slots__ = (
         "_block",
         "_freq_bins",
-        "_louder_streak",
         "_mu",
         "_partitions",
         "_pending",
@@ -186,8 +190,6 @@ class EchoCanceller:
         self._ref_powers = np.zeros(self._partitions, dtype=np.float64)
         #: Сглаженная мощность опорного сигнала по бинам — знаменатель NLMS.
         self._power = np.zeros(self._freq_bins, dtype=np.float64)
-        #: Сколько блоков подряд остаток был громче входа.
-        self._louder_streak = 0
 
         self._ref_len = max(int(sample_rate * ref_seconds), 4 * block)
         self._ref = np.zeros(self._ref_len, dtype=np.float32)
@@ -356,12 +358,7 @@ class EchoCanceller:
         output = near if louder else residual
         if louder:
             self.stats.rejected += 1
-            self._louder_streak += 1
-            if self._louder_streak >= DIVERGENCE_STREAK:
-                self._weights *= LEAK
-                self.stats.erle_db = max(ERLE_CLIP_DB[0], self.stats.erle_db - 1.0)
         else:
-            self._louder_streak = 0
             if echo_power > 0.0:
                 measured = 10.0 * np.log10(max(near_power, 1e-20) / max(residual_power, 1e-20))
                 measured = float(np.clip(measured, *ERLE_CLIP_DB))
@@ -391,6 +388,15 @@ class EchoCanceller:
         step = (2.0 * self._mu) * np.conj(self._spectra) * error_spectrum / (self._power + delta)
         self._weights += step
         self.stats.adapted += 1
+
+        # Настоящее расхождение видно по весам: они уходят за физически
+        # возможные значения. Сжимаем, а не обнуляем — направление обычно
+        # верное, велик только масштаб.
+        peak = float(np.abs(self._weights).max())
+        if peak > WEIGHT_LIMIT:
+            self._weights *= LEAK
+            self.stats.leaked += 1
+            self.stats.erle_db = max(ERLE_CLIP_DB[0], self.stats.erle_db - 3.0)
         return output
 
     def reset(self) -> None:
@@ -399,7 +405,6 @@ class EchoCanceller:
         self._spectra[:] = 0
         self._ref_powers[:] = 0.0
         self._power[:] = 0.0
-        self._louder_streak = 0
         self._ref[:] = 0.0
         self._ref_end = 0
         self._pending = np.zeros(0, dtype=np.float32)

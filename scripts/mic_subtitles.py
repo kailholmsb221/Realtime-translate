@@ -49,7 +49,7 @@ import re
 import sys
 import time
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -163,6 +163,11 @@ DEFAULT_VAD_THRESHOLD: Final[float] = 0.7
 #: Минимальная длина речи, мс. Штатные 250 мс пропускают всплески шума
 #: вентилятора — whisper потом пишет их как «ссссссс».
 DEFAULT_MIN_SPEECH_MS: Final[int] = 400
+
+#: Как часто считать промежуточную гипотезу, мс. Каждая — это whisper на всём
+#: накопленном аудио фразы; на 7-секундной фразе раз в секунду это заметная
+#: нагрузка на GPU и на GIL, из-за которой цикл событий подтормаживает.
+DEFAULT_PARTIAL_MS: Final[int] = 1_500
 
 #: beam search whisper. 1 — штатный быстрый режим движка; 2-3 точнее, но каждая
 #: фраза распознаётся заметно дольше, а задержка в разговоре важнее.
@@ -355,6 +360,19 @@ def build_mic(config: AudioConfig, index: int | None) -> AudioSource:
         chunk_ms=config.chunk_ms,
         timeout_s=config.device_timeout_s,
     )
+
+
+@dataclass(slots=True)
+class SpeechJob:
+    """Переведённая фраза, ожидающая озвучки."""
+
+    index: int
+    source: str
+    text: str
+    t_end_ms: int
+    stt_ms: int
+    mt_ms: int
+    queued_at: float
 
 
 class Broadcaster:
@@ -694,7 +712,9 @@ class MicSubtitles:
         """Читать микрофон и публиковать события распознавания."""
         queue: asyncio.Queue[tuple[Envelope, int, float] | None] = asyncio.Queue()
         self._queue = queue
-        worker = asyncio.create_task(self._worker(queue), name="mic-subtitles-worker")
+        speech: asyncio.Queue[SpeechJob | None] = asyncio.Queue()
+        worker = asyncio.create_task(self._worker(queue, speech), name="mic-subtitles-worker")
+        speaker = asyncio.create_task(self._speak_worker(speech), name="mic-subtitles-speaker")
         self._t0 = None
         failed = False
         try:
@@ -732,6 +752,9 @@ class MicSubtitles:
             queue.put_nowait(None)
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+            speech.put_nowait(None)
+            with contextlib.suppress(asyncio.CancelledError):
+                await speaker
         if failed:
             await self._close_source()
             await asyncio.sleep(RESTART_DELAY_S)
@@ -776,27 +799,44 @@ class MicSubtitles:
 
         return timed()
 
-    async def _worker(self, queue: asyncio.Queue[tuple[Envelope, int, float] | None]) -> None:
-        """Переводит фразы по очереди: распознавание не ждёт NLLB."""
+    async def _worker(
+        self,
+        queue: asyncio.Queue[tuple[Envelope, int, float] | None],
+        speech: asyncio.Queue[SpeechJob | None],
+    ) -> None:
+        """Переводит фразы по очереди: распознавание не ждёт NLLB, NLLB не ждёт TTS."""
         while True:
             item = await queue.get()
             if item is None:
                 return
             try:
-                await self._handle_final(*item)
+                job = await self._handle_final(*item)
+                if job is not None:
+                    speech.put_nowait(job)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("фраза пропущена")
 
-    async def _handle_final(self, envelope: Envelope, stt_ms: int, queued_at: float) -> None:
+    async def _speak_worker(self, speech: asyncio.Queue[SpeechJob | None]) -> None:
+        """Озвучивает переводы по очереди и публикует метрики."""
+        while True:
+            job = await speech.get()
+            if job is None:
+                return
+            try:
+                await self._deliver(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("озвучка пропущена")
+
+    async def _handle_final(
+        self, envelope: Envelope, stt_ms: int, queued_at: float
+    ) -> SpeechJob | None:
         payload = envelope.payload
         if not isinstance(payload, SttFinal):  # pragma: no cover — чужое событие
-            return
-        # Сколько фраза простояла в очереди за предыдущими. Меряется до
-        # перевода: длинная фраза переводится дольше секунды, и если считать
-        # после, она сама себя признает протухшей.
-        waited_ms = round((time.perf_counter() - queued_at) * 1000)
+            return None
 
         self.index += 1
         ready = await self._translation.handle(envelope, self._lang_dst)
@@ -809,23 +849,35 @@ class MicSubtitles:
         self._print(f"\n[{self.index:02d}] whisper : {payload.text}")
         self._print(f"     в NLLB  : {payload.text}")
         self._print(f"     перевод : {text}")
+        return SpeechJob(
+            index=self.index,
+            source=payload.text,
+            text=text,
+            t_end_ms=payload.t_end_ms,
+            stt_ms=stt_ms,
+            mt_ms=mt_ms,
+            queued_at=queued_at,
+        )
 
-        # Бюджет ARCHITECTURE.md раздела 2 — «конец фразы → озвучка», поэтому
-        # засекаем момент ПЕРВОГО чанка синтеза, а не конца проигрывания: пока
-        # перевод дочитывается, задержка уже не растёт (так же в pipeline.py).
+    async def _deliver(self, job: SpeechJob) -> None:
+        """Озвучить перевод (если он ещё актуален) и опубликовать метрики."""
+        # Сколько фраза прождала от распознавания до своей очереди на озвучку.
+        waited_ms = round((time.perf_counter() - job.queued_at) * 1000)
         if waited_ms > self._stale_ms:
             # Отстаём: синтез идёт последовательно, и озвучка этой фразы
             # прозвучала бы через несколько секунд после сказанного. Текст в
-            # панель уходит всё равно. Правило «в очереди есть ещё — молчать»
-            # тут не годится: пока длинная фраза переводится, следом почти
-            # всегда успевает прийти короткая, и длинная теряла голос.
+            # панели уже есть — голос пропускаем, чтобы догнать разговор.
             logger.info("фраза ждала %d мс — не озвучиваю, только текст", waited_ms)
             tts_ms, spoken_s, first_at = 0, 0.0, None
         else:
-            tts_ms, spoken_s, first_at = await self._speak(text, payload.text)
+            tts_ms, spoken_s, first_at = await self._speak(job.text, job.source)
+        # Бюджет ARCHITECTURE.md раздела 2 — «конец фразы → озвучка», поэтому
+        # засекаем момент ПЕРВОГО чанка синтеза, а не конца проигрывания: пока
+        # перевод дочитывается, задержка уже не растёт (так же в pipeline.py).
         ready_at = first_at if first_at is not None else time.perf_counter()
         elapsed_ms = round((ready_at - (self._t0 or ready_at)) * 1000)
-        total_ms = max(0, elapsed_ms - payload.t_end_ms)
+        total_ms = max(0, elapsed_ms - job.t_end_ms)
+        stt_ms, mt_ms = job.stt_ms, job.mt_ms
 
         await self._bus.publish(
             Envelope.wrap(
@@ -841,12 +893,12 @@ class MicSubtitles:
 
         voiced = f", озвучено {spoken_s:.1f} с" if spoken_s > 0 else ""
         if self._aec is not None and self._aec.stats.adapted > 0:
-            erle = self._aec.stats.erle_db
+            st = self._aec.stats
+            erle = st.erle_db
             voiced += f", эхо {erle:+.0f} дБ" if erle < 3 else f", эхо подавлено на {erle:.0f} дБ"
-            if self._aec.stats.rejected:
-                voiced += f", фильтр сброшен ×{self._aec.stats.rejected}"
+            voiced += f" [блоков громче: {st.rejected}, сжатий весов: {st.leaked}]"
         self._print(
-            f"              (stt {stt_ms} мс, mt {mt_ms} мс, tts {tts_ms} мс, "
+            f"     [{job.index:02d}]  (stt {stt_ms} мс, mt {mt_ms} мс, tts {tts_ms} мс, "
             f"итого {total_ms} мс{voiced})"
         )
 
@@ -1066,6 +1118,7 @@ async def _amain(args: argparse.Namespace) -> int:
         vad_threshold=args.vad_threshold,
         preroll_ms=args.preroll_ms,
         min_speech_ms=args.min_speech_ms,
+        partial_interval_ms=DEFAULT_PARTIAL_MS,
     )
     print("Загружаю модели (первый запуск — дольше, веса читаются с диска)…")
     stt = create_engine(stt_config, backend="faster_whisper", vad_backend="silero")
